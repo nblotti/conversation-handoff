@@ -82,7 +82,9 @@ store:
   url: "$pg:5432/handoff"
   user: handoff
   password: pass
+  owner: ci
   ssl: false
+  encryption_key: "ci-verify-key-not-secret"
 EOF
 
 docker run --rm --network "$network" \
