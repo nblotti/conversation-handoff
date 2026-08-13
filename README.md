@@ -4,7 +4,7 @@ Hand off a **full Claude Code or Codex conversation** to a new chat when the con
 
 The new chat does not get the whole transcript. You paste a **one-line reference**. The new session calls `load` to pull the brief about the latest message, and `recall` if you ask about the past conversation. Lookups walk parent threads.
 
-You do **not** need Rust to run it. Download a release binary (or use the install script), then register it with Claude and Codex.
+You do **not** need Rust to run it. Download a release binary (or use the install script), then register it with Claude and Codex. Linux releases are **static musl** binaries, so they run on older distributions (AlmaLinux, RHEL, etc.) without GLIBC upgrades and without compiling from source.
 
 ## What it does
 
@@ -120,9 +120,11 @@ The skill in `.agents/skills/handoff/` (and copied to `~/.agents/skills/` by ins
 | `attach_image` | Store a png/jpeg/gif/webp (`/handoff img <path>`) |
 | `get_image` | Return pixels for an `id#1` reference |
 
+Linux install never compiles from source. If the prebuilt binary cannot run, the installer exits with an unsupported-platform error instead of calling Cargo.
+
 ## Build from source (optional)
 
-Needs [Rust](https://rustup.rs/).
+Needs [Rust](https://rustup.rs/). This is for development only, not for GLIBC workarounds.
 
 ```bash
 git clone https://github.com/nblotti/conversation-handoff

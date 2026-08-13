@@ -1,6 +1,6 @@
 [package]
 name = "conversation-handoff"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 rust-version = "1.85"
 description = "Hand off a full Claude or Codex conversation to a new chat, and recall only the parts that still matter."
@@ -17,11 +17,11 @@ base64 = "0.22"
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
-native-tls = "0.2"
 postgres = "0.19"
-postgres-native-tls = "0.5"
 rmcp = { version = "3.1", features = ["server", "transport-io", "macros", "schemars"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring", "native-certs", "webpki-roots"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"

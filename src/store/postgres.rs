@@ -17,29 +17,42 @@ pub struct PostgresBackend {
 
 impl PostgresBackend {
     pub fn connect(cfg: &StoreConfig) -> Result<Self> {
-        let mut client = connect(cfg)?;
-        migrate::apply_postgres(&mut client).context("postgres migrations")?;
-        Ok(Self {
-            client: Mutex::new(client),
+        run_off_tokio(|| {
+            let mut client = connect(cfg)?;
+            migrate::apply_postgres(&mut client).context("postgres migrations")?;
+            Ok(Self {
+                client: Mutex::new(client),
+            })
+        })
+    }
+
+    fn with_client<R: Send>(&self, f: impl FnOnce(&mut Client) -> Result<R> + Send) -> Result<R> {
+        run_off_tokio(|| {
+            let mut client = self
+                .client
+                .lock()
+                .map_err(|_| anyhow::anyhow!("postgres connection lock poisoned"))?;
+            f(&mut client)
         })
     }
 }
 
 impl Backend for PostgresBackend {
     fn load(&self, id: &str) -> Result<Option<Conversation>> {
-        let mut client = lock(&self.client)?;
-        let row = client
-            .query_opt(
-                "SELECT id, parent_id, title, created_at, latest_message, brief, chunks,
-                        summary, status, updated_at, last_saved_at, pruned_at, chunk_count
-                 FROM conversations WHERE id = $1",
-                &[&id],
-            )
-            .context("postgres load")?;
-        match row {
-            None => Ok(None),
-            Some(row) => Ok(Some(row_to_conv(&row)?)),
-        }
+        self.with_client(|client| {
+            let row = client
+                .query_opt(
+                    "SELECT id, parent_id, title, created_at, latest_message, brief, chunks,
+                            summary, status, updated_at, last_saved_at, pruned_at, chunk_count
+                     FROM conversations WHERE id = $1",
+                    &[&id],
+                )
+                .context("postgres load")?;
+            match row {
+                None => Ok(None),
+                Some(row) => Ok(Some(row_to_conv(&row)?)),
+            }
+        })
     }
 
     fn save(&self, conv: &Conversation) -> Result<()> {
@@ -50,25 +63,25 @@ impl Backend for PostgresBackend {
         let pruned = conv.pruned_at.map(|v| v as i64);
         let chunk_count = conv.chunk_count as i64;
         let status = conv.status.as_str();
-        let mut client = lock(&self.client)?;
-        let params: [&(dyn ToSql + Sync); 13] = [
-            &conv.id,
-            &conv.parent_id,
-            &conv.title,
-            &created,
-            &conv.latest_message,
-            &conv.brief,
-            &chunks,
-            &conv.summary,
-            &status,
-            &updated,
-            &last_saved,
-            &pruned,
-            &chunk_count,
-        ];
-        client
-            .execute(
-                "INSERT INTO conversations (
+        self.with_client(|client| {
+            let params: [&(dyn ToSql + Sync); 13] = [
+                &conv.id,
+                &conv.parent_id,
+                &conv.title,
+                &created,
+                &conv.latest_message,
+                &conv.brief,
+                &chunks,
+                &conv.summary,
+                &status,
+                &updated,
+                &last_saved,
+                &pruned,
+                &chunk_count,
+            ];
+            client
+                .execute(
+                    "INSERT INTO conversations (
                     id, parent_id, title, created_at, latest_message, brief, chunks,
                     summary, status, updated_at, last_saved_at, pruned_at, chunk_count
                  )
@@ -86,10 +99,11 @@ impl Backend for PostgresBackend {
                    last_saved_at = EXCLUDED.last_saved_at,
                    pruned_at = EXCLUDED.pruned_at,
                    chunk_count = EXCLUDED.chunk_count",
-                &params,
-            )
-            .context("postgres save")?;
-        Ok(())
+                    &params,
+                )
+                .context("postgres save")?;
+            Ok(())
+        })
     }
 
     fn list(&self, filter: &ListFilter) -> Result<Vec<Conversation>> {
@@ -100,61 +114,64 @@ impl Backend for PostgresBackend {
             .map(|d| filter.now_secs.saturating_sub(d) as i64)
             .unwrap_or(0);
         let limit = filter.limit.max(1) as i64;
-        let mut client = lock(&self.client)?;
-        let rows = client
-            .query(
-                "SELECT id, parent_id, title, created_at, latest_message, brief, chunks,
-                        summary, status, updated_at, last_saved_at, pruned_at, chunk_count
-                 FROM conversations
-                 WHERE ($1 OR status != 'pruned')
-                   AND (NOT $2 OR updated_at < $3)
-                 ORDER BY updated_at DESC
-                 LIMIT $4",
-                &[&include_pruned, &has_cutoff, &cutoff, &limit],
-            )
-            .context("postgres list")?;
-        let mut out = Vec::new();
-        for row in rows {
-            let mut conv = row_to_conv(&row)?;
-            conv.chunks.clear();
-            out.push(conv);
-        }
-        Ok(out)
+        self.with_client(|client| {
+            let rows = client
+                .query(
+                    "SELECT id, parent_id, title, created_at, latest_message, brief, chunks,
+                            summary, status, updated_at, last_saved_at, pruned_at, chunk_count
+                     FROM conversations
+                     WHERE ($1 OR status != 'pruned')
+                       AND (NOT $2 OR updated_at < $3)
+                     ORDER BY updated_at DESC
+                     LIMIT $4",
+                    &[&include_pruned, &has_cutoff, &cutoff, &limit],
+                )
+                .context("postgres list")?;
+            let mut out = Vec::new();
+            for row in rows {
+                let mut conv = row_to_conv(&row)?;
+                conv.chunks.clear();
+                out.push(conv);
+            }
+            Ok(out)
+        })
     }
 
     fn prune(&self, id: &str, pruned_at: u64) -> Result<bool> {
         let pruned_at = pruned_at as i64;
-        let mut client = lock(&self.client)?;
-        let n = client
-            .execute(
-                "UPDATE conversations SET
+        self.with_client(|client| {
+            let n = client
+                .execute(
+                    "UPDATE conversations SET
                     chunks = '[]',
                     brief = NULL,
                     status = 'pruned',
                     pruned_at = $2,
                     updated_at = $2
                  WHERE id = $1 AND status != 'pruned'",
-                &[&id, &pruned_at],
-            )
-            .context("postgres prune conversation")?;
-        client
-            .execute(
-                "UPDATE images SET bytes = NULL WHERE conversation_id = $1",
-                &[&id],
-            )
-            .context("postgres prune images")?;
-        Ok(n > 0)
+                    &[&id, &pruned_at],
+                )
+                .context("postgres prune conversation")?;
+            client
+                .execute(
+                    "UPDATE images SET bytes = NULL WHERE conversation_id = $1",
+                    &[&id],
+                )
+                .context("postgres prune images")?;
+            Ok(n > 0)
+        })
     }
 
     fn purge(&self, id: &str) -> Result<bool> {
-        let mut client = lock(&self.client)?;
-        client
-            .execute("DELETE FROM images WHERE conversation_id = $1", &[&id])
-            .context("postgres purge images")?;
-        let n = client
-            .execute("DELETE FROM conversations WHERE id = $1", &[&id])
-            .context("postgres purge conversation")?;
-        Ok(n > 0)
+        self.with_client(|client| {
+            client
+                .execute("DELETE FROM images WHERE conversation_id = $1", &[&id])
+                .context("postgres purge images")?;
+            let n = client
+                .execute("DELETE FROM conversations WHERE id = $1", &[&id])
+                .context("postgres purge conversation")?;
+            Ok(n > 0)
+        })
     }
 
     fn add_image(
@@ -171,110 +188,120 @@ impl Backend for PostgresBackend {
         let bytes = bytes.to_vec();
         let caption = caption.map(str::to_string);
         let source = source.map(str::to_string);
-        let mut client = lock(&self.client)?;
-        let seq: i32 = client
-            .query_one(
-                "SELECT COALESCE(MAX(seq), 0) + 1 FROM images WHERE conversation_id = $1",
-                &[&conversation_id],
-            )
-            .context("postgres next image seq")?
-            .get(0);
-        client
-            .execute(
-                "INSERT INTO images (conversation_id, seq, caption, mime, bytes, byte_len, source, created_at)
+        self.with_client(|client| {
+            let seq: i32 = client
+                .query_one(
+                    "SELECT COALESCE(MAX(seq), 0) + 1 FROM images WHERE conversation_id = $1",
+                    &[&conversation_id],
+                )
+                .context("postgres next image seq")?
+                .get(0);
+            client
+                .execute(
+                    "INSERT INTO images (conversation_id, seq, caption, mime, bytes, byte_len, source, created_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-                &[
-                    &conversation_id,
-                    &seq,
-                    &caption,
-                    &mime,
-                    &bytes,
-                    &byte_len,
-                    &source,
-                    &created,
-                ],
-            )
-            .context("postgres insert image")?;
-        Ok(ImageMeta {
-            conversation_id: conversation_id.to_string(),
-            seq: seq as i64,
-            caption,
-            mime: mime.to_string(),
-            byte_len: byte_len as u64,
-            has_bytes: true,
-            source,
+                    &[
+                        &conversation_id,
+                        &seq,
+                        &caption,
+                        &mime,
+                        &bytes,
+                        &byte_len,
+                        &source,
+                        &created,
+                    ],
+                )
+                .context("postgres insert image")?;
+            Ok(ImageMeta {
+                conversation_id: conversation_id.to_string(),
+                seq: seq as i64,
+                caption,
+                mime: mime.to_string(),
+                byte_len: byte_len as u64,
+                has_bytes: true,
+                source,
+            })
         })
     }
 
     fn load_image(&self, conversation_id: &str, seq: i64) -> Result<Option<ImageBlob>> {
         let seq_i32 = seq as i32;
-        let mut client = lock(&self.client)?;
-        let row = client
-            .query_opt(
-                "SELECT caption, mime, bytes, byte_len, source
+        self.with_client(|client| {
+            let row = client
+                .query_opt(
+                    "SELECT caption, mime, bytes, byte_len, source
                  FROM images WHERE conversation_id = $1 AND seq = $2",
-                &[&conversation_id, &seq_i32],
-            )
-            .context("postgres load_image")?;
-        match row {
-            None => Ok(None),
-            Some(row) => {
-                let bytes: Option<Vec<u8>> = row.get(2);
-                let has_bytes = bytes.as_ref().map(|b| !b.is_empty()).unwrap_or(false);
-                Ok(Some(ImageBlob {
-                    meta: ImageMeta {
-                        conversation_id: conversation_id.to_string(),
-                        seq,
-                        caption: row.get(0),
-                        mime: row.get(1),
-                        byte_len: row.get::<_, i64>(3) as u64,
-                        has_bytes,
-                        source: row.get(4),
-                    },
-                    bytes: bytes.unwrap_or_default(),
-                }))
+                    &[&conversation_id, &seq_i32],
+                )
+                .context("postgres load_image")?;
+            match row {
+                None => Ok(None),
+                Some(row) => {
+                    let bytes: Option<Vec<u8>> = row.get(2);
+                    let has_bytes = bytes.as_ref().map(|b| !b.is_empty()).unwrap_or(false);
+                    Ok(Some(ImageBlob {
+                        meta: ImageMeta {
+                            conversation_id: conversation_id.to_string(),
+                            seq,
+                            caption: row.get(0),
+                            mime: row.get(1),
+                            byte_len: row.get::<_, i64>(3) as u64,
+                            has_bytes,
+                            source: row.get(4),
+                        },
+                        bytes: bytes.unwrap_or_default(),
+                    }))
+                }
             }
-        }
+        })
     }
 
     fn list_images(&self, conversation_id: &str) -> Result<Vec<ImageMeta>> {
-        let mut client = lock(&self.client)?;
-        let rows = client
-            .query(
-                "SELECT seq, caption, mime,
+        self.with_client(|client| {
+            let rows = client
+                .query(
+                    "SELECT seq, caption, mime,
                         bytes IS NOT NULL AND octet_length(bytes) > 0,
                         byte_len, source
                  FROM images WHERE conversation_id = $1 ORDER BY seq",
-                &[&conversation_id],
-            )
-            .context("postgres list_images")?;
-        Ok(rows
-            .iter()
-            .map(|row| ImageMeta {
-                conversation_id: conversation_id.to_string(),
-                seq: row.get::<_, i32>(0) as i64,
-                caption: row.get(1),
-                mime: row.get(2),
-                has_bytes: row.get(3),
-                byte_len: row.get::<_, i64>(4) as u64,
-                source: row.get(5),
-            })
-            .collect())
+                    &[&conversation_id],
+                )
+                .context("postgres list_images")?;
+            Ok(rows
+                .iter()
+                .map(|row| ImageMeta {
+                    conversation_id: conversation_id.to_string(),
+                    seq: row.get::<_, i32>(0) as i64,
+                    caption: row.get(1),
+                    mime: row.get(2),
+                    has_bytes: row.get(3),
+                    byte_len: row.get::<_, i64>(4) as u64,
+                    source: row.get(5),
+                })
+                .collect())
+        })
     }
 
     fn is_empty(&self) -> Result<bool> {
-        let mut client = lock(&self.client)?;
-        let n: i64 = client
-            .query_one("SELECT COUNT(*) FROM conversations", &[])?
-            .get(0);
-        Ok(n == 0)
+        self.with_client(|client| {
+            let n: i64 = client
+                .query_one("SELECT COUNT(*) FROM conversations", &[])?
+                .get(0);
+            Ok(n == 0)
+        })
     }
 }
 
-fn lock(client: &Mutex<Client>) -> Result<std::sync::MutexGuard<'_, Client>> {
-    client
-        .lock()
-        .map_err(|_| anyhow::anyhow!("postgres connection lock poisoned"))
+fn run_off_tokio<R: Send>(f: impl FnOnce() -> Result<R> + Send) -> Result<R> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        std::thread::scope(|s| {
+            s.spawn(f)
+                .join()
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("postgres worker thread panicked")))
+        })
+    } else {
+        f()
+    }
 }
 
 fn row_to_conv(row: &Row) -> Result<Conversation> {
@@ -334,11 +361,19 @@ fn connect(cfg: &StoreConfig) -> Result<Client> {
 }
 
 fn connect_tls(pg: &postgres::Config) -> Result<Client> {
-    let connector = native_tls::TlsConnector::builder()
-        .build()
-        .context("build tls connector")?;
-    let connector = postgres_native_tls::MakeTlsConnector::new(connector);
-    pg.connect(connector).context("connect postgres (tls)")
+    pg.connect(rustls_connector()?)
+        .context("connect postgres (tls)")
+}
+
+fn rustls_connector() -> Result<tokio_postgres_rustls::MakeRustlsConnect> {
+    static RING: std::sync::Once = std::sync::Once::new();
+    RING.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+    match tokio_postgres_rustls::MakeRustlsConnect::with_native_certs() {
+        Ok((tls, _)) => Ok(tls),
+        Err(_) => Ok(tokio_postgres_rustls::MakeRustlsConnect::with_webpki_roots()),
+    }
 }
 
 struct PgTarget {

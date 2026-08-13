@@ -1,3 +1,5 @@
 /target
 **/*.rs.bk
 .conversation-manager/
+/dist/
+/conversation-handoff-linux-*

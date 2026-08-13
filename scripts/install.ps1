@@ -10,7 +10,20 @@ $Url = "https://github.com/$Repo/releases/latest/download/$Asset"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $Dest = Join-Path $InstallDir $Name
 Write-Host "Downloading $Url"
-Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
+try {
+    Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
+} catch {
+    Write-Error "No prebuilt Windows binary is available at $Url. This installer does not compile from source."
+    exit 1
+}
+
+try {
+    & $Dest --version | Out-Null
+} catch {
+    Write-Error "The downloaded binary cannot run on this system. This installer does not fall back to cargo build."
+    if (Test-Path $Dest) { Remove-Item -Force $Dest }
+    exit 1
+}
 
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($UserPath -notlike "*$InstallDir*") {

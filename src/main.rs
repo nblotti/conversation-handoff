@@ -136,11 +136,16 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Mcp) {
-        Command::Mcp => run_mcp().await,
+        Command::Mcp => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("tokio runtime")?;
+            rt.block_on(run_mcp())
+        }
         Command::Save {
             conversation_id,
             text,

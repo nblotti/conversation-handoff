@@ -11,16 +11,74 @@ permissions:
 jobs:
   linux:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            artifact: conversation-handoff-linux-x86_64
+          - target: aarch64-unknown-linux-musl
+            artifact: conversation-handoff-linux-aarch64
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package
-        run: cp target/release/conversation-handoff conversation-handoff-linux-x86_64
+        run: cp "target/${{ matrix.target }}/release/conversation-handoff" "${{ matrix.artifact }}"
+      - name: Check static linkage
+        run: |
+          set -euo pipefail
+          file "${{ matrix.artifact }}"
+          info="$(file "${{ matrix.artifact }}")"
+          if echo "$info" | grep -qi 'dynamically linked'; then
+            echo "ERROR: Linux release must be a static musl binary (no GLIBC)." >&2
+            exit 1
+          fi
+          if ! echo "$info" | grep -Eqi 'statically linked|static-pie linked'; then
+            echo "ERROR: expected a statically linked musl binary." >&2
+            exit 1
+          fi
+      - name: Verify on AlmaLinux 8
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: bash scripts/verify-linux-portable.sh "${{ matrix.artifact }}"
       - uses: softprops/action-gh-release@v2
         with:
-          files: conversation-handoff-linux-x86_64
+          files: ${{ matrix.artifact }}
+          generate_release_notes: true
+
+  macos:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: conversation-handoff-macos-x86_64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact: conversation-handoff-macos-aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: cp "target/${{ matrix.target }}/release/conversation-handoff" "${{ matrix.artifact }}"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}
           generate_release_notes: true
 
   windows:
