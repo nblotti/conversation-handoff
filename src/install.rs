@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use toml_edit::{value, DocumentMut, Item, Table};
 
 const SERVER_NAME: &str = "conversation-handoff";
-const SKILL_MD: &str = include_str!("../skills/conversation-handoff/SKILL.md");
+const SKILL_MD: &str = include_str!("../skills/handoff/SKILL.md");
 
 pub struct InstallReport {
     pub binary: PathBuf,
@@ -20,9 +20,7 @@ pub fn install(binary: Option<PathBuf>, write_instructions: bool) -> Result<Inst
         Some(p) => p,
         None => std::env::current_exe().context("resolve current executable")?,
     };
-    let binary = binary
-        .canonicalize()
-        .unwrap_or(binary);
+    let binary = binary.canonicalize().unwrap_or(binary);
     let mut lines = Vec::new();
     lines.push(format!("Binary: {}", binary.display()));
 
@@ -90,8 +88,7 @@ fn install_claude(binary: &Path) -> Result<String> {
 fn write_claude_json(binary: &Path) -> Result<String> {
     let path = claude_json_path()?;
     let mut root = if path.exists() {
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         serde_json::from_str::<Value>(&text).unwrap_or_else(|_| json!({}))
     } else {
         json!({})
@@ -133,8 +130,7 @@ fn install_codex(binary: &Path) -> Result<String> {
 fn write_codex_toml(binary: &Path) -> Result<String> {
     let path = codex_config_path()?;
     let mut doc = if path.exists() {
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         text.parse::<DocumentMut>()
             .with_context(|| format!("parse {}", path.display()))?
     } else {
@@ -154,8 +150,7 @@ fn write_codex_toml(binary: &Path) -> Result<String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&path, doc.to_string())
-        .with_context(|| format!("write {}", path.display()))?;
+    fs::write(&path, doc.to_string()).with_context(|| format!("write {}", path.display()))?;
     Ok(format!("wrote {}", path.display()))
 }
 
@@ -208,16 +203,19 @@ When the context window is nearly full:
 1. Call `handoff`. Show the user only the one-line `reference` (`conversation-handoff: <id>`). Do not paste a brief.
 2. In the new chat, call `load` with that id and work from the brief.
 3. If the user asks to look in the past conversation, call `recall`. A specific question finds matching parts.
-4. During long sessions, call `remember` to checkpoint facts.
+4. During long sessions, call `save` with work since `last_saved_at`.
+5. Chat commands: `/handoff` (save), `/handoff new`, `/handoff list`, `/handoff use <id>`, `/handoff rm <id>`, `/handoff img <path>`.
 "
 }
 
 fn write_skills() -> Result<String> {
     let home = home_dir()?;
-    let claude = home.join(".claude/skills/conversation-handoff/SKILL.md");
-    let agents = home.join(".agents/skills/conversation-handoff/SKILL.md");
+    let claude = home.join(".claude/skills/handoff/SKILL.md");
+    let agents = home.join(".agents/skills/handoff/SKILL.md");
     write_skill_file(&claude)?;
     write_skill_file(&agents)?;
+    let _ = fs::remove_dir_all(home.join(".claude/skills/conversation-handoff"));
+    let _ = fs::remove_dir_all(home.join(".agents/skills/conversation-handoff"));
     Ok(format!("{} and {}", claude.display(), agents.display()))
 }
 

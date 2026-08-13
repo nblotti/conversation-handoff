@@ -7,25 +7,34 @@ use serde::{Deserialize, Serialize};
 const SAMPLE: &str = r#"# conversation-handoff storage
 #
 # type:
-#   file      JSON files (default)
-#   sqlite    local embedded database (like H2)
+#   sqlite    local embedded database (default)
 #   postgres  PostgreSQL
+#   file      accepted for older configs; mapped to sqlite and JSON files
+#             in the data dir are imported once
 #
 # url:
-#   file      directory for JSON files (empty = platform data dir)
 #   sqlite    path to the .db file (empty = platform data dir / handoff.db)
 #   postgres  host:port/database  or  postgres://host:port/database
 #
 # user / password: used for postgres. password may also come from
 # CONVERSATION_HANDOFF_DB_PASSWORD.
 #
-# ssl: postgres only, default true.
+# ssl: postgres only. omit to try TLS then plain. set false for no TLS.
+#
+# encryption_key: if set, title / latest_message / brief / chunks / summary
+# and image bytes are encrypted at rest (ChaCha20-Poly1305). Can also come
+# from CONVERSATION_HANDOFF_ENCRYPTION_KEY. Changing the key makes old rows
+# unreadable.
+#
+# max_image_bytes: reject attached images larger than this (default 10485760).
 
 store:
-  type: file
+  type: sqlite
   url: ""
   user: ""
   password: ""
+  encryption_key: ""
+  max_image_bytes: 10485760
 "#;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -45,13 +54,23 @@ pub struct StoreConfig {
     pub user: String,
     #[serde(default)]
     pub password: String,
-    /// Postgres TLS. Default true. Set false for local servers without SSL.
+    /// Postgres TLS. Omit to try TLS then plain. Set false for no TLS.
     #[serde(default)]
     pub ssl: Option<bool>,
+    /// If set, encrypt stored content. Also CONVERSATION_HANDOFF_ENCRYPTION_KEY.
+    #[serde(default)]
+    pub encryption_key: String,
+    /// Reject attached images larger than this. 0 means the built-in 10 MB default.
+    #[serde(default = "default_max_image_bytes")]
+    pub max_image_bytes: u64,
 }
 
 fn default_store_type() -> String {
-    "file".into()
+    "sqlite".into()
+}
+
+fn default_max_image_bytes() -> u64 {
+    crate::store::DEFAULT_MAX_IMAGE_BYTES
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,9 +86,7 @@ impl StoreConfig {
             "" | "file" | "files" | "json" => Ok(StoreKind::File),
             "sqlite" | "local" | "h2" => Ok(StoreKind::Sqlite),
             "postgres" | "postgresql" | "pg" => Ok(StoreKind::Postgres),
-            other => anyhow::bail!(
-                "unknown store.type {other:?}; use file, sqlite, or postgres"
-            ),
+            other => anyhow::bail!("unknown store.type {other:?}; use file, sqlite, or postgres"),
         }
     }
 
@@ -94,6 +111,11 @@ impl StoreConfig {
                 self.password = v;
             }
         }
+        if let Ok(v) = std::env::var("CONVERSATION_HANDOFF_ENCRYPTION_KEY") {
+            if !v.is_empty() {
+                self.encryption_key = v;
+            }
+        }
     }
 }
 
@@ -101,8 +123,8 @@ impl Config {
     pub fn load() -> Result<Self> {
         let path = config_path();
         let mut cfg = if path.exists() {
-            let text = fs::read_to_string(&path)
-                .with_context(|| format!("read {}", path.display()))?;
+            let text =
+                fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
             parse_yaml(&text).with_context(|| format!("parse {}", path.display()))?
         } else {
             Config::default()
@@ -134,7 +156,7 @@ pub fn config_path() -> PathBuf {
         return PathBuf::from(p);
     }
     dirs::config_dir()
-        .unwrap_or_else(|| std::env::temp_dir())
+        .unwrap_or_else(std::env::temp_dir)
         .join("conversation-handoff")
         .join("config.yaml")
 }

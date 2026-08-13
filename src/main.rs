@@ -24,8 +24,9 @@ struct Cli {
 enum Command {
     /// Run as an MCP stdio server (default). This is what Claude Code and Codex launch.
     Mcp,
-    /// Checkpoint notes on a conversation before the window fills.
-    Remember {
+    /// Checkpoint notes on a conversation since the last save.
+    #[command(visible_alias = "remember")]
+    Save {
         #[arg(long)]
         conversation_id: String,
         #[arg(long)]
@@ -34,6 +35,8 @@ enum Command {
         text_file: Option<PathBuf>,
         #[arg(long)]
         title: Option<String>,
+        #[arg(long)]
+        summary: Option<String>,
     },
     /// Link a full thread to a new conversation and print a one-line reference.
     Handoff {
@@ -49,6 +52,8 @@ enum Command {
         context_file: Option<PathBuf>,
         #[arg(long)]
         title: Option<String>,
+        #[arg(long)]
+        summary: Option<String>,
     },
     /// Load the stored brief for a continuation id.
     Load {
@@ -69,7 +74,52 @@ enum Command {
         #[arg(long)]
         conversation_id: String,
     },
-    /// Write a sample YAML config (file / sqlite / postgres).
+    /// List conversations as one-sentence summaries.
+    List {
+        /// Only older than this, e.g. 30d.
+        #[arg(long)]
+        older_than: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long)]
+        contains: Option<String>,
+        #[arg(long)]
+        thread: Option<String>,
+        #[arg(long)]
+        include_pruned: bool,
+    },
+    /// Drop stored content, keep a one-sentence summary (unless --purge).
+    Forget {
+        #[arg(long)]
+        conversation_id: Option<String>,
+        #[arg(long)]
+        older_than: Option<String>,
+        #[arg(long)]
+        purge: bool,
+    },
+    /// Attach a png/jpeg/gif/webp to a conversation.
+    AttachImage {
+        #[arg(long)]
+        conversation_id: String,
+        #[arg(long)]
+        caption: Option<String>,
+        #[arg(long)]
+        path: Option<PathBuf>,
+        #[arg(long)]
+        data_base64: Option<String>,
+        #[arg(long)]
+        mime: Option<String>,
+    },
+    /// Write an attached image to a file.
+    Image {
+        /// Reference like conversation-id#1.
+        #[arg(long)]
+        reference: String,
+        /// Where to write the bytes.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Write a sample YAML config (sqlite / postgres).
     InitConfig {
         /// Where to write the file (defaults to the platform config path).
         #[arg(long)]
@@ -91,14 +141,15 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Mcp) {
         Command::Mcp => run_mcp().await,
-        Command::Remember {
+        Command::Save {
             conversation_id,
             text,
             text_file,
             title,
+            summary,
         } => {
             let text = read_input(text, text_file)?;
-            print_json(&engine()?.remember(&conversation_id, &text, title)?)
+            print_json(&engine()?.save(&conversation_id, &text, title, summary)?)
         }
         Command::Handoff {
             thread_id,
@@ -107,6 +158,7 @@ async fn main() -> Result<()> {
             context,
             context_file,
             title,
+            summary,
         } => {
             let context = read_input(context, context_file)?;
             print_json(&engine()?.handoff(
@@ -115,6 +167,7 @@ async fn main() -> Result<()> {
                 &latest_message,
                 &context,
                 title,
+                summary,
             )?)
         }
         Command::Load { conversation_id } => print_json(&engine()?.load(&conversation_id)?),
@@ -122,18 +175,56 @@ async fn main() -> Result<()> {
             conversation_id,
             query,
             max_results,
-        } => print_json(&engine()?.recall(
-            &conversation_id,
-            query.as_deref(),
-            max_results,
+        } => print_json(&engine()?.recall(&conversation_id, query.as_deref(), max_results)?),
+        Command::Thread { conversation_id } => print_json(&engine()?.thread(&conversation_id)?),
+        Command::List {
+            older_than,
+            limit,
+            contains,
+            thread,
+            include_pruned,
+        } => print_json(&engine()?.list(
+            older_than.as_deref(),
+            limit,
+            contains.as_deref(),
+            thread.as_deref(),
+            include_pruned,
         )?),
-        Command::Thread { conversation_id } => {
-            print_json(&engine()?.thread(&conversation_id)?)
+        Command::Forget {
+            conversation_id,
+            older_than,
+            purge,
+        } => print_json(&engine()?.forget(
+            conversation_id.as_deref(),
+            older_than.as_deref(),
+            purge,
+        )?),
+        Command::AttachImage {
+            conversation_id,
+            caption,
+            path,
+            data_base64,
+            mime,
+        } => print_json(&engine()?.attach_image(
+            &conversation_id,
+            caption.as_deref(),
+            path.as_deref().and_then(|p| p.to_str()),
+            data_base64.as_deref(),
+            mime.as_deref(),
+        )?),
+        Command::Image { reference, out } => {
+            let img = engine()?.image(&reference)?;
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&out, img.bytes).with_context(|| format!("write {}", out.display()))?;
+            println!("wrote {} ({} bytes)", out.display(), img.meta.byte_len);
+            Ok(())
         }
         Command::InitConfig { path } => {
             let written = conversation_handoff::config::write_sample(path)?;
             println!("Wrote {}", written.display());
-            println!("Edit store.type (file, sqlite, or postgres), url, user, and password.");
+            println!("Edit store.type (sqlite or postgres), url, user, and password.");
             Ok(())
         }
         Command::Install {
@@ -168,8 +259,7 @@ fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
 
 fn read_input(inline: Option<String>, file: Option<PathBuf>) -> Result<String> {
     if let Some(path) = file {
-        return std::fs::read_to_string(&path)
-            .with_context(|| format!("read {}", path.display()));
+        return std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()));
     }
     if let Some(text) = inline {
         return Ok(text);

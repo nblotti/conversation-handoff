@@ -1,5 +1,6 @@
 pub mod chunk;
 pub mod config;
+pub mod crypto;
 pub mod engine;
 pub mod install;
 pub mod mcp;
