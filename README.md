@@ -8,7 +8,7 @@ You do **not** need Rust to run it. Download a release binary (or use the instal
 
 ## What it does
 
-1. In a long session, the model can `save` important facts since the last checkpoint (`/handoff` or `/handoff save`).
+1. In a long session, the model can `save` important facts **and images** since the last checkpoint (`/handoff` or `/handoff save`).
 2. When the window is full, it calls `handoff` (`/handoff new`) with:
    - `thread_id` — this conversation
    - `new_conversation_id` — id for the next chat
@@ -20,7 +20,7 @@ You do **not** need Rust to run it. Download a release binary (or use the instal
 4. The new chat calls `load` with that id and works from the stored brief.
 5. If you say to look in the past conversation, it calls `recall`. A specific question finds matching parts; a vague request returns extra parent context.
 6. `/handoff list` shows a one-sentence summary per conversation so you can pick one (`/handoff use <id>`). `/handoff rm <id>` drops stored content but keeps that summary, so an old reference still resolves.
-7. Screenshots attach with `/handoff img <path>`. Other tools return a short `id#1` reference; `get_image` fetches the pixels.
+7. Screenshots in the chat are stored with `/handoff` / `/handoff new` by default. `/handoff img <path>` attaches one extra. Other tools return a short `id#1` reference; `get_image` fetches the pixels.
 8. `/handoff help` prints the command list and where `owner` / `encryption_key` go in the config file.
 9. The new chat can `handoff` again. Threads nest.
 
@@ -111,7 +111,7 @@ The skill in `.agents/skills/handoff/` (and copied to `~/.agents/skills/` by ins
 
 | Tool | What it does |
 |------|----------------|
-| `save` | Store notes since `last_saved_at` (`/handoff` / `/handoff save`) |
+| `save` | Store notes and images since `last_saved_at` (`/handoff` / `/handoff save`) |
 | `handoff` | Link thread → new id, store context, return a one-line `reference` (`/handoff new`) |
 | `load` | Pull the stored brief for that id (call this in the new chat, or `/handoff use <id>`) |
 | `recall` | Extra parent context, or the parts that match a question |

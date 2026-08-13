@@ -29,14 +29,14 @@ Then start a new session and approve the tools. If the prebuilt binary cannot ru
 
 | User types | You call |
 |------------|----------|
-| `/handoff` or `/handoff save` | `save` with work **since** `last_saved_at` (from the last `load`/`save`). Include a one-sentence `summary`. |
-| `/handoff new` | `handoff`. Show the user **only** the `reference` line. |
+| `/handoff` or `/handoff save` | `save` with work **since** `last_saved_at` **and every image** from the chat (path or base64). Include a one-sentence `summary`. |
+| `/handoff new` | `handoff` with the same images. Show the user **only** the `reference` line. |
 | `/handoff list` | `list` |
 | `/handoff list 30d` | `list` with `older_than: 30d` |
 | `/handoff use <id>` | `load` with that id |
 | `/handoff rm <id>` | `forget` (keeps the summary, drops content and image bytes) |
 | `/handoff clean 30d` | `forget` with `older_than: 30d` |
-| `/handoff img <path>` | `attach_image` with a short caption |
+| `/handoff img <path>` | `attach_image` for one extra screenshot (not required; `/handoff` already stores images) |
 | `/handoff help` | `help` — show this table and where `store.owner` / `store.encryption_key` go |
 
 ## Config (shared Postgres)
@@ -60,8 +60,8 @@ store:
 
 ## When the window is filling
 
-1. Call `save` with durable facts since the last checkpoint.
-2. Call `handoff` with `thread_id`, `new_conversation_id`, `latest_message`, and recent relevant `context`.
+1. Call `save` with durable facts since the last checkpoint **and every image the user added to this chat** (`images` with `path` or `data_base64`). Do this by default; do not wait for `/handoff img`.
+2. Call `handoff` with `thread_id`, `new_conversation_id`, `latest_message`, recent relevant `context`, and those same images.
 3. Show the user **only** the `reference` line, for example:
 
    `conversation-handoff: <new-id>`

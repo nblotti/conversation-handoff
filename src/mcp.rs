@@ -9,19 +9,19 @@ use rmcp::{
 };
 use serde::Deserialize;
 
-use crate::engine::Engine;
+use crate::engine::{Engine, ImageInput};
 use crate::store::Store;
 
 const INSTRUCTIONS: &str = "\
 Use this server when a conversation is running out of context, when a new chat starts with a conversation-handoff reference, when the user types /handoff, or when they ask about a past conversation.
 
 Workflow:
-1. During a long session, call save with work since last_saved_at (user command: /handoff or /handoff save).
-2. When the window is nearly full, call handoff with thread_id, new_conversation_id, latest_message, and only recent relevant context. User command: /handoff new.
+1. During a long session, call save with work since last_saved_at AND every image the user added to the chat (path or data_base64). User command: /handoff or /handoff save. Always include images; do not wait for /handoff img.
+2. When the window is nearly full, call handoff with thread_id, new_conversation_id, latest_message, recent relevant context, and those same images. User command: /handoff new.
 3. Show the user ONLY the returned `reference` line (conversation-handoff: <id>). Do not paste a brief or transcript.
 4. In a new chat that contains that reference, immediately call load with the id. Work from the returned brief.
 5. If the user asks to look in the past conversation, or something is missing, call recall. A specific question finds matching parts; a vague 'past conversation' request returns extra parent context.
-6. /handoff list shows YOUR conversations as one-sentence summaries. /handoff use <id> loads one. /handoff rm <id> prunes content but keeps the summary. /handoff img <path> attaches a screenshot. /handoff help prints the command list and where store.owner / store.encryption_key go in config.yaml.
+6. /handoff list shows YOUR conversations as one-sentence summaries. /handoff use <id> loads one. /handoff rm <id> prunes content but keeps the summary. /handoff img <path> attaches one extra screenshot; /handoff already stores images from the chat. /handoff help prints the command list and where store.owner / store.encryption_key go in config.yaml.
 7. load and recall return image references like id#1, never the pixels. Call get_image with that reference when you need to see the picture.
 8. A continuation can itself be handed off. Chains can be arbitrarily long.
 
@@ -52,6 +52,25 @@ pub struct SaveParams {
     /// Optional one-sentence summary shown in list.
     #[serde(default)]
     pub summary: Option<String>,
+    /// Images from this chat since last_saved_at. Always pass these on /handoff; do not wait for /handoff img.
+    #[serde(default)]
+    pub images: Option<Vec<SaveImage>>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SaveImage {
+    /// Path to a png/jpeg/gif/webp file.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Raw image as base64 (or a data: URL) if there is no file path.
+    #[serde(default)]
+    pub data_base64: Option<String>,
+    /// One-line caption used later by recall.
+    #[serde(default)]
+    pub caption: Option<String>,
+    /// MIME type if sniffing from bytes fails.
+    #[serde(default)]
+    pub mime: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -70,6 +89,9 @@ pub struct HandoffParams {
     /// Optional one-sentence summary shown in list.
     #[serde(default)]
     pub summary: Option<String>,
+    /// Images from this chat. Always pass these on /handoff new; they are stored on the parent thread.
+    #[serde(default)]
+    pub images: Option<Vec<SaveImage>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -155,12 +177,13 @@ pub struct GetImageParams {
 #[tool_router]
 impl ConversationService {
     #[tool(
-        description = "Checkpoint work on a conversation since last_saved_at. Call this for /handoff or /handoff save. Returns when the previous save was."
+        description = "Checkpoint work on a conversation since last_saved_at. Call this for /handoff or /handoff save. Always include every image from the chat (path or data_base64); do not wait for /handoff img."
     )]
     fn save(&self, Parameters(p): Parameters<SaveParams>) -> String {
+        let images = to_image_inputs(p.images);
         match self
             .engine
-            .save(&p.conversation_id, &p.text, p.title, p.summary)
+            .save(&p.conversation_id, &p.text, p.title, p.summary, &images)
         {
             Ok(v) => json(&v),
             Err(e) => error(e),
@@ -168,9 +191,10 @@ impl ConversationService {
     }
 
     #[tool(
-        description = "Link a full conversation to a new one. Stores searchable context and returns a one-line `reference`. Show the user only that line. Do not paste a brief. User command: /handoff new."
+        description = "Link a full conversation to a new one. Stores searchable context and images, then returns a one-line `reference`. Show the user only that line. Always include images from the chat. User command: /handoff new."
     )]
     fn handoff(&self, Parameters(p): Parameters<HandoffParams>) -> String {
+        let images = to_image_inputs(p.images);
         match self.engine.handoff(
             &p.thread_id,
             &p.new_conversation_id,
@@ -178,6 +202,7 @@ impl ConversationService {
             &p.context,
             p.title,
             p.summary,
+            &images,
         ) {
             Ok(v) => json(&v),
             Err(e) => error(e),
@@ -304,6 +329,19 @@ impl ServerHandler for ConversationService {
 
 fn json<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|e| format!("serialize error: {e}"))
+}
+
+fn to_image_inputs(images: Option<Vec<SaveImage>>) -> Vec<ImageInput> {
+    images
+        .unwrap_or_default()
+        .into_iter()
+        .map(|img| ImageInput {
+            path: img.path,
+            data_base64: img.data_base64,
+            caption: img.caption,
+            mime: img.mime,
+        })
+        .collect()
 }
 
 fn error(err: impl std::fmt::Display) -> String {

@@ -19,6 +19,7 @@ pub struct SaveResult {
     pub saved_at: u64,
     pub since_last_save: String,
     pub summary: Option<String>,
+    pub attached_images: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -28,6 +29,7 @@ pub struct HandoffResult {
     pub thread_id: String,
     pub new_conversation_id: String,
     pub stored_chunks: usize,
+    pub attached_images: Vec<String>,
     pub hint: String,
 }
 
@@ -128,6 +130,15 @@ pub struct LoadedImage {
     pub bytes: Vec<u8>,
 }
 
+/// Image to store with save / handoff. Path or base64 is required.
+#[derive(Debug, Default, Clone)]
+pub struct ImageInput {
+    pub path: Option<String>,
+    pub data_base64: Option<String>,
+    pub caption: Option<String>,
+    pub mime: Option<String>,
+}
+
 pub struct Engine {
     store: Store,
 }
@@ -151,6 +162,7 @@ impl Engine {
         text: &str,
         title: Option<String>,
         summary: Option<String>,
+        images: &[ImageInput],
     ) -> Result<SaveResult> {
         let id = require_id(conversation_id, "conversation_id")?;
         let mut conv = self.store.get_or_create(id, None)?;
@@ -176,6 +188,7 @@ impl Engine {
         let total_chunks = conv.chunk_count;
         let summary = conv.summary.clone();
         self.store.save(&conv)?;
+        let attached_images = self.attach_many(id, images)?;
         Ok(SaveResult {
             conversation_id: id.to_string(),
             stored_chunks,
@@ -184,6 +197,7 @@ impl Engine {
             saved_at: now,
             since_last_save: since_last_save(previous_saved_at, now),
             summary,
+            attached_images,
         })
     }
 
@@ -195,6 +209,7 @@ impl Engine {
         context: &str,
         title: Option<String>,
         summary: Option<String>,
+        images: &[ImageInput],
     ) -> Result<HandoffResult> {
         let thread_id = require_id(thread_id, "thread_id")?;
         let new_id = require_id(new_conversation_id, "new_conversation_id")?;
@@ -249,12 +264,19 @@ impl Engine {
                 .unwrap_or_else(|| first_sentence(latest_message, SUMMARY_CHARS)),
         );
         self.store.save(&child)?;
+        let image_target = if parent.status == Status::Pruned {
+            new_id
+        } else {
+            thread_id
+        };
+        let attached_images = self.attach_many(image_target, images)?;
 
         Ok(HandoffResult {
             reference: reference_line(new_id),
             thread_id: thread_id.to_string(),
             new_conversation_id: new_id.to_string(),
             stored_chunks: chunks.len(),
+            attached_images,
             hint: format!(
                 "Show the user only this line: {}. In the new chat, call load with that id. Do not paste the brief.",
                 reference_line(new_id)
@@ -270,7 +292,15 @@ impl Engine {
         })?;
         let chain = self.store.chain(conversation_id)?;
         let parent_chain: Vec<String> = chain.iter().map(|c| c.id.clone()).collect();
-        let images = conv.images.iter().map(image_ref).collect();
+        let mut images = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for c in &chain {
+            for img in &c.images {
+                if seen.insert(img.reference()) {
+                    images.push(image_ref(img));
+                }
+            }
+        }
         let hint = if conv.status == Status::Pruned {
             "This conversation was pruned. Only the summary remains. Call list to pick another, or recall from a child that still has this id as parent.".to_string()
         } else {
@@ -542,6 +572,29 @@ impl Engine {
             mode: mode.to_string(),
             hint,
         })
+    }
+
+    fn attach_many(&self, conversation_id: &str, images: &[ImageInput]) -> Result<Vec<String>> {
+        let mut refs = Vec::new();
+        for img in images {
+            let has_path = img.path.as_deref().is_some_and(|s| !s.trim().is_empty());
+            let has_data = img
+                .data_base64
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty());
+            if !has_path && !has_data {
+                continue;
+            }
+            let attached = self.attach_image(
+                conversation_id,
+                img.caption.as_deref(),
+                img.path.as_deref(),
+                img.data_base64.as_deref(),
+                img.mime.as_deref(),
+            )?;
+            refs.push(attached.reference);
+        }
+        Ok(refs)
     }
 
     pub fn attach_image(
@@ -991,6 +1044,7 @@ mod tests {
                  Docs: README screenshots were updated yesterday.",
                 Some("auth ci".into()),
                 None,
+                &[],
             )
             .unwrap();
 
@@ -1018,6 +1072,7 @@ mod tests {
                 "Decision: treat nested comments as whitespace.",
                 None,
                 None,
+                &[],
             )
             .unwrap();
         let recalled = engine
@@ -1040,6 +1095,7 @@ mod tests {
                 "The parser rejects nested comments. Decision: treat them as whitespace.",
                 None,
                 None,
+                &[],
             )
             .unwrap();
         engine
@@ -1050,6 +1106,7 @@ mod tests {
                 "Currently writing unit tests.",
                 None,
                 None,
+                &[],
             )
             .unwrap();
 
@@ -1073,11 +1130,18 @@ mod tests {
                 "API base url is https://example.test/v2",
                 None,
                 None,
+                &[],
             )
             .unwrap();
         assert_eq!(first.since_last_save, "first save");
         let second = engine
-            .save("solo", "timeout is 30s", None, Some("api client".into()))
+            .save(
+                "solo",
+                "timeout is 30s",
+                None,
+                Some("api client".into()),
+                &[],
+            )
             .unwrap();
         assert!(second.since_last_save.contains("since last save"));
         let recalled = engine.recall("solo", Some("api base url"), None).unwrap();
@@ -1098,6 +1162,7 @@ mod tests {
                 "Decision: treat nested comments as whitespace.",
                 None,
                 Some("parser whitespace decision".into()),
+                &[],
             )
             .unwrap();
         engine.forget(Some("root"), None, false).unwrap();
@@ -1128,6 +1193,7 @@ mod tests {
                 "we switched the auth crate to jsonwebtoken",
                 None,
                 None,
+                &[],
             )
             .unwrap();
         let listed = engine.list(None, None, Some("auth"), None, false).unwrap();
@@ -1151,7 +1217,7 @@ mod tests {
         let (dir, engine) = engine();
         let path = dir.path().join("shot.png");
         std::fs::write(&path, TINY_PNG).unwrap();
-        engine.save("c1", "debugging CI", None, None).unwrap();
+        engine.save("c1", "debugging CI", None, None, &[]).unwrap();
         let attached = engine
             .attach_image(
                 "c1",
@@ -1168,6 +1234,41 @@ mod tests {
         assert!(recalled.matches.iter().any(|m| m.text.contains("c1#1")));
         let img = engine.image("c1#1").unwrap();
         assert_eq!(img.bytes, TINY_PNG);
+    }
+
+    #[test]
+    fn save_and_handoff_store_images_by_default() {
+        let (dir, engine) = engine();
+        let path = dir.path().join("shot.png");
+        std::fs::write(&path, TINY_PNG).unwrap();
+        let images = [ImageInput {
+            path: Some(path.to_string_lossy().into_owned()),
+            caption: Some("failing CI screenshot".into()),
+            ..Default::default()
+        }];
+        let saved = engine
+            .save("t1", "debugging CI", None, None, &images)
+            .unwrap();
+        assert_eq!(saved.attached_images, vec!["t1#1"]);
+
+        let handed = engine
+            .handoff(
+                "t1",
+                "c2",
+                "continue from the screenshot",
+                "See the CI screenshot.",
+                None,
+                None,
+                &images,
+            )
+            .unwrap();
+        assert_eq!(handed.attached_images, vec!["t1#2"]);
+
+        let loaded = engine.load("c2").unwrap();
+        let refs: Vec<_> = loaded.images.iter().map(|i| i.reference.as_str()).collect();
+        assert!(refs.contains(&"t1#1"), "{refs:?}");
+        assert!(refs.contains(&"t1#2"), "{refs:?}");
+        assert_eq!(engine.image("t1#1").unwrap().bytes, TINY_PNG);
     }
 
     #[test]

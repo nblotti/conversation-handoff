@@ -22,7 +22,7 @@ pub fn commands() -> Vec<HelpCommand> {
     vec![
         HelpCommand {
             typed: "/handoff".into(),
-            does: "save notes since the last checkpoint".into(),
+            does: "save notes and any images from the chat since the last checkpoint".into(),
         },
         HelpCommand {
             typed: "/handoff save".into(),
@@ -30,7 +30,8 @@ pub fn commands() -> Vec<HelpCommand> {
         },
         HelpCommand {
             typed: "/handoff new".into(),
-            does: "hand off to a new chat; you only get conversation-handoff: <id>".into(),
+            does: "hand off to a new chat (text + images); you only get conversation-handoff: <id>"
+                .into(),
         },
         HelpCommand {
             typed: "/handoff list".into(),
@@ -54,7 +55,7 @@ pub fn commands() -> Vec<HelpCommand> {
         },
         HelpCommand {
             typed: "/handoff img <path>".into(),
-            does: "attach a screenshot".into(),
+            does: "attach one extra screenshot (also done automatically on /handoff)".into(),
         },
         HelpCommand {
             typed: "/handoff help".into(),

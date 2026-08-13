@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use conversation_handoff::engine::Engine;
+use conversation_handoff::engine::{Engine, ImageInput};
 use conversation_handoff::install::{self, print_report};
 use conversation_handoff::mcp::ConversationService;
 use conversation_handoff::store::Store;
@@ -37,6 +37,9 @@ enum Command {
         title: Option<String>,
         #[arg(long)]
         summary: Option<String>,
+        /// Images to store with this save (repeatable).
+        #[arg(long)]
+        image: Vec<PathBuf>,
     },
     /// Link a full thread to a new conversation and print a one-line reference.
     Handoff {
@@ -54,6 +57,9 @@ enum Command {
         title: Option<String>,
         #[arg(long)]
         summary: Option<String>,
+        /// Images to store on the parent thread (repeatable).
+        #[arg(long)]
+        image: Vec<PathBuf>,
     },
     /// Load the stored brief for a continuation id.
     Load {
@@ -157,9 +163,11 @@ fn main() -> Result<()> {
             text_file,
             title,
             summary,
+            image,
         } => {
             let text = read_input(text, text_file)?;
-            print_json(&engine()?.save(&conversation_id, &text, title, summary)?)
+            let images = paths_to_images(&image);
+            print_json(&engine()?.save(&conversation_id, &text, title, summary, &images)?)
         }
         Command::Handoff {
             thread_id,
@@ -169,8 +177,10 @@ fn main() -> Result<()> {
             context_file,
             title,
             summary,
+            image,
         } => {
             let context = read_input(context, context_file)?;
+            let images = paths_to_images(&image);
             print_json(&engine()?.handoff(
                 &thread_id,
                 &new_id,
@@ -178,6 +188,7 @@ fn main() -> Result<()> {
                 &context,
                 title,
                 summary,
+                &images,
             )?)
         }
         Command::Load { conversation_id } => print_json(&engine()?.load(&conversation_id)?),
@@ -283,4 +294,15 @@ fn read_input(inline: Option<String>, file: Option<PathBuf>) -> Result<String> {
     let mut buf = String::new();
     io::stdin().read_to_string(&mut buf)?;
     Ok(buf)
+}
+
+fn paths_to_images(paths: &[PathBuf]) -> Vec<ImageInput> {
+    paths
+        .iter()
+        .filter_map(|p| p.to_str().map(|s| s.to_string()))
+        .map(|path| ImageInput {
+            path: Some(path),
+            ..Default::default()
+        })
+        .collect()
 }
