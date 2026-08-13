@@ -21,10 +21,12 @@ const SAMPLE: &str = r#"# conversation-handoff storage
 #
 # ssl: postgres only. omit to try TLS then plain. set false for no TLS.
 #
-# encryption_key: if set, title / latest_message / brief / chunks / summary
-# and image bytes are encrypted at rest (ChaCha20-Poly1305). Can also come
-# from CONVERSATION_HANDOFF_ENCRYPTION_KEY. Changing the key makes old rows
-# unreadable.
+# owner: YOUR name. list/load only see this person's rows. Required for
+# postgres (falls back to $USER). Also CONVERSATION_HANDOFF_OWNER.
+#
+# encryption_key: required for postgres. Title, summary, topic, brief,
+# notes, parent links, and images are ciphertext without it.
+# Also CONVERSATION_HANDOFF_ENCRYPTION_KEY.
 #
 # max_image_bytes: reject attached images larger than this (default 10485760).
 
@@ -33,6 +35,7 @@ store:
   url: ""
   user: ""
   password: ""
+  owner: ""
   encryption_key: ""
   max_image_bytes: 10485760
 "#;
@@ -57,6 +60,9 @@ pub struct StoreConfig {
     /// Postgres TLS. Omit to try TLS then plain. Set false for no TLS.
     #[serde(default)]
     pub ssl: Option<bool>,
+    /// If set, only this owner's conversations are visible. Also CONVERSATION_HANDOFF_OWNER.
+    #[serde(default)]
+    pub owner: String,
     /// If set, encrypt stored content. Also CONVERSATION_HANDOFF_ENCRYPTION_KEY.
     #[serde(default)]
     pub encryption_key: String,
@@ -111,11 +117,38 @@ impl StoreConfig {
                 self.password = v;
             }
         }
+        if let Ok(v) = std::env::var("CONVERSATION_HANDOFF_OWNER") {
+            if !v.trim().is_empty() {
+                self.owner = v;
+            }
+        }
         if let Ok(v) = std::env::var("CONVERSATION_HANDOFF_ENCRYPTION_KEY") {
             if !v.is_empty() {
                 self.encryption_key = v;
             }
         }
+    }
+
+    /// Configured owner, or the login name for postgres so every save is stamped.
+    pub fn resolved_owner(&self, kind: StoreKind) -> Result<String> {
+        let configured = self.owner.trim();
+        if !configured.is_empty() {
+            return Ok(configured.to_string());
+        }
+        if !matches!(kind, StoreKind::Postgres) {
+            return Ok(String::new());
+        }
+        let fallback = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_default();
+        let fallback = fallback.trim().to_string();
+        if fallback.is_empty() {
+            anyhow::bail!(
+                "postgres requires store.owner in {} (or CONVERSATION_HANDOFF_OWNER)",
+                config_path().display()
+            );
+        }
+        Ok(fallback)
     }
 }
 
@@ -195,6 +228,10 @@ store:
         assert_eq!(nested.store.kind().unwrap(), StoreKind::Postgres);
         assert_eq!(nested.store.user, "alice");
         assert_eq!(nested.store.ssl, Some(false));
+        assert_eq!(nested.store.owner, "");
+
+        let owned = parse_yaml("store:\n  type: postgres\n  owner: nblotti\n").unwrap();
+        assert_eq!(owned.store.owner, "nblotti");
 
         let flat = parse_yaml(
             r#"
@@ -213,5 +250,16 @@ url: /tmp/handoff.db
         assert_eq!(h2.store.kind().unwrap(), StoreKind::Sqlite);
         let local = parse_yaml("type: local\n").unwrap();
         assert_eq!(local.store.kind().unwrap(), StoreKind::Sqlite);
+    }
+
+    #[test]
+    fn owner_from_config() {
+        let mut cfg = StoreConfig {
+            owner: "nblotti".into(),
+            ..StoreConfig::default()
+        };
+        assert_eq!(cfg.resolved_owner(StoreKind::Postgres).unwrap(), "nblotti");
+        cfg.owner = "  ".into();
+        assert_eq!(cfg.resolved_owner(StoreKind::Sqlite).unwrap(), "");
     }
 }

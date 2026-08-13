@@ -15,9 +15,12 @@
 #
 # ssl: postgres only. omit to try TLS then plain. set false for no TLS.
 #
-# encryption_key: encrypt title / latest_message / brief / chunks / summary
-# and image bytes at rest. Also CONVERSATION_HANDOFF_ENCRYPTION_KEY.
-# Changing the key makes old data unreadable.
+# owner: YOUR name. list/load only this person's rows. Required for
+# postgres (falls back to $USER). Also CONVERSATION_HANDOFF_OWNER.
+#
+# encryption_key: required for postgres. Title, summary, topic, brief,
+# notes, parent links, and images are ciphertext without it.
+# Also CONVERSATION_HANDOFF_ENCRYPTION_KEY.
 #
 # max_image_bytes: reject attached images larger than this (default 10 MB).
 
@@ -26,5 +29,6 @@ store:
   url: ""
   user: ""
   password: ""
+  owner: ""
   encryption_key: ""
   max_image_bytes: 10485760

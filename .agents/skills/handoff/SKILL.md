@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: Hand off a full Claude or Codex conversation to a new chat with a one-line reference, then load, save, list, or recall stored context. Use when the user types /handoff, context is full, a message contains conversation-handoff:, they ask to look in a past conversation, or they want to list or delete old references.
+description: Hand off a full Claude or Codex conversation to a new chat with a one-line reference, then load, save, list, or recall stored context. Use when the user types /handoff, /handoff help, context is full, a message contains conversation-handoff:, they ask to look in a past conversation, or they want to list or delete old references.
 ---
 
 # /handoff
@@ -37,6 +37,26 @@ Then start a new session and approve the tools. If the prebuilt binary cannot ru
 | `/handoff rm <id>` | `forget` (keeps the summary, drops content and image bytes) |
 | `/handoff clean 30d` | `forget` with `older_than: 30d` |
 | `/handoff img <path>` | `attach_image` with a short caption |
+| `/handoff help` | `help` — show this table and where `store.owner` / `store.encryption_key` go |
+
+## Config (shared Postgres)
+
+`owner` and `encryption_key` go in the YAML config, under `store:` (not in chat):
+
+- Linux: `~/.config/conversation-handoff/config.yaml`
+- Windows: `%APPDATA%\conversation-handoff\config.yaml`
+
+```yaml
+store:
+  type: postgres
+  url: "host:5432/dbname"
+  user: sashiko
+  password: "..."
+  owner: your-name
+  encryption_key: "a long secret only you know"
+```
+
+`/handoff list` only shows that owner. Title, summary, topic, brief, notes, and images are ciphertext without `encryption_key`. Also `CONVERSATION_HANDOFF_OWNER` and `CONVERSATION_HANDOFF_ENCRYPTION_KEY`.
 
 ## When the window is filling
 

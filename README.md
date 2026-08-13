@@ -21,7 +21,8 @@ You do **not** need Rust to run it. Download a release binary (or use the instal
 5. If you say to look in the past conversation, it calls `recall`. A specific question finds matching parts; a vague request returns extra parent context.
 6. `/handoff list` shows a one-sentence summary per conversation so you can pick one (`/handoff use <id>`). `/handoff rm <id>` drops stored content but keeps that summary, so an old reference still resolves.
 7. Screenshots attach with `/handoff img <path>`. Other tools return a short `id#1` reference; `get_image` fetches the pixels.
-8. The new chat can `handoff` again. Threads nest.
+8. `/handoff help` prints the command list and where `owner` / `encryption_key` go in the config file.
+9. The new chat can `handoff` again. Threads nest.
 
 ## Install (no Rust)
 
@@ -116,6 +117,7 @@ The skill in `.agents/skills/handoff/` (and copied to `~/.agents/skills/` by ins
 | `recall` | Extra parent context, or the parts that match a question |
 | `thread` | Show the chain from this id back to the root |
 | `list` | One-sentence cards so you can pick a conversation (`/handoff list`) |
+| `help` | Command list and where `store.owner` / `store.encryption_key` go (`/handoff help`) |
 | `forget` | Drop content and image bytes, keep the summary (`/handoff rm <id>`) |
 | `attach_image` | Store a png/jpeg/gif/webp (`/handoff img <path>`) |
 | `get_image` | Return pixels for an `id#1` reference |
@@ -157,6 +159,7 @@ store:
   url: "db.example.com:5432/conversation_handoff"
   user: handoff
   password: "change-me"
+  owner: "your-name"      # required if several people share this database
   ssl: true               # optional; omit to try TLS then plain
   encryption_key: "change-me-long-secret"
   max_image_bytes: 10485760
@@ -166,7 +169,9 @@ store:
 
 For postgres, `url` can also be `postgres://user:pass@host:5432/dbname`. `user` / `password` in the file override the URL. The password can come from `CONVERSATION_HANDOFF_DB_PASSWORD` instead of the YAML file.
 
-If `encryption_key` is set (or `CONVERSATION_HANDOFF_ENCRYPTION_KEY`), stored text and image bytes are encrypted with ChaCha20-Poly1305. Ids and parent links stay plaintext so chains still work. Keep the config file mode `600`. Changing the key makes previously stored content unreadable.
+Set `owner` (or `CONVERSATION_HANDOFF_OWNER`) under `store:` in that file. `/handoff list` and `load` then only see that person's rows. For postgres, if `owner` is empty the login name (`$USER`) is used so every save is still stamped. Existing rows with no owner stay visible only when `owner` is empty; to keep them after you set an owner, run `UPDATE conversations SET owner = 'your-name' WHERE owner = '';`
+
+Postgres requires `encryption_key` (or `CONVERSATION_HANDOFF_ENCRYPTION_KEY`). Title, summary, topic, brief, notes, parent links, captions, and image bytes are ChaCha20-Poly1305 ciphertext. Ids stay plaintext so `conversation-handoff: <id>` still works. Without the key, list skips those rows — you never see the topic or summary. Keep the config file mode `600`. Changing the key makes previously stored content unreadable.
 
 SQLite and Postgres schema is created with versioned SQL migrations (`src/store/migrations/`), applied once at startup and recorded in `schema_migrations`. Same idea as Flyway, embedded in the binary — no extra JVM tool.
 

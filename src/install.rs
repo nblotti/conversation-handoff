@@ -226,7 +226,7 @@ When the context window is nearly full:
 2. In the new chat, call `load` with that id and work from the brief.
 3. If the user asks to look in the past conversation, call `recall`. A specific question finds matching parts.
 4. During long sessions, call `save` with work since `last_saved_at`.
-5. Chat commands: `/handoff` (save), `/handoff new`, `/handoff list`, `/handoff use <id>`, `/handoff rm <id>`, `/handoff img <path>`.
+5. Chat commands: `/handoff` (save), `/handoff new`, `/handoff list`, `/handoff use <id>`, `/handoff rm <id>`, `/handoff img <path>`, `/handoff help`.
 "
 }
 

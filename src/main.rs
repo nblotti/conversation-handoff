@@ -88,6 +88,8 @@ enum Command {
         #[arg(long)]
         include_pruned: bool,
     },
+    /// Show chat commands and where owner / encryption_key go in the config.
+    Help,
     /// Drop stored content, keep a one-sentence summary (unless --purge).
     Forget {
         #[arg(long)]
@@ -198,6 +200,10 @@ fn main() -> Result<()> {
             thread.as_deref(),
             include_pruned,
         )?),
+        Command::Help => {
+            print!("{}", conversation_handoff::help::from_config_file().text);
+            Ok(())
+        }
         Command::Forget {
             conversation_id,
             older_than,
@@ -232,7 +238,7 @@ fn main() -> Result<()> {
         Command::InitConfig { path } => {
             let written = conversation_handoff::config::write_sample(path)?;
             println!("Wrote {}", written.display());
-            println!("Edit store.type (sqlite or postgres), url, user, and password.");
+            println!("Edit store.type (sqlite or postgres), url, user, password, and owner.");
             Ok(())
         }
         Command::Install {

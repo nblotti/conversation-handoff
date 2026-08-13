@@ -21,7 +21,7 @@ Workflow:
 3. Show the user ONLY the returned `reference` line (conversation-handoff: <id>). Do not paste a brief or transcript.
 4. In a new chat that contains that reference, immediately call load with the id. Work from the returned brief.
 5. If the user asks to look in the past conversation, or something is missing, call recall. A specific question finds matching parts; a vague 'past conversation' request returns extra parent context.
-6. /handoff list shows conversations as one-sentence summaries. /handoff use <id> loads one. /handoff rm <id> prunes content but keeps the summary. /handoff img <path> attaches a screenshot.
+6. /handoff list shows YOUR conversations as one-sentence summaries. /handoff use <id> loads one. /handoff rm <id> prunes content but keeps the summary. /handoff img <path> attaches a screenshot. /handoff help prints the command list and where store.owner / store.encryption_key go in config.yaml.
 7. load and recall return image references like id#1, never the pixels. Call get_image with that reference when you need to see the picture.
 8. A continuation can itself be handed off. Chains can be arbitrarily long.
 
@@ -231,6 +231,13 @@ impl ConversationService {
             Ok(v) => json(&v),
             Err(e) => error(e),
         }
+    }
+
+    #[tool(
+        description = "Show /handoff commands and where to put store.owner and store.encryption_key in config.yaml. Call this for /handoff help. Show the user the `text` field."
+    )]
+    fn help(&self) -> String {
+        json(&self.engine.help())
     }
 
     #[tool(

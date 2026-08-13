@@ -23,6 +23,12 @@ pub const MIGRATIONS: &[Migration] = &[
         sqlite: include_str!("migrations/V002__images_and_lifecycle.sqlite.sql"),
         postgres: include_str!("migrations/V002__images_and_lifecycle.postgres.sql"),
     },
+    Migration {
+        version: 3,
+        name: "owner",
+        sqlite: include_str!("migrations/V003__owner.sqlite.sql"),
+        postgres: include_str!("migrations/V003__owner.postgres.sql"),
+    },
 ];
 
 const SQLITE_BOOKKEEPING: &str = r#"

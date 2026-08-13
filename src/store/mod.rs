@@ -91,6 +91,9 @@ pub struct Conversation {
     pub chunk_count: usize,
     #[serde(default)]
     pub images: Vec<ImageMeta>,
+    /// Person this row belongs to. Empty means unscoped (visible to everyone).
+    #[serde(default)]
+    pub owner: String,
 }
 
 impl Conversation {
@@ -111,6 +114,7 @@ impl Conversation {
             pruned_at: None,
             chunk_count: 0,
             images: Vec::new(),
+            owner: String::new(),
         }
     }
 
@@ -119,6 +123,19 @@ impl Conversation {
             self.chunk_count = self.chunks.len();
         }
     }
+
+    pub fn has_ciphertext(&self) -> bool {
+        opt_ciphertext(self.parent_id.as_deref())
+            || opt_ciphertext(self.title.as_deref())
+            || opt_ciphertext(self.latest_message.as_deref())
+            || opt_ciphertext(self.brief.as_deref())
+            || opt_ciphertext(self.summary.as_deref())
+            || self.chunks.iter().any(|c| Crypto::is_ciphertext_text(c))
+    }
+}
+
+fn opt_ciphertext(value: Option<&str>) -> bool {
+    value.is_some_and(Crypto::is_ciphertext_text)
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +144,8 @@ pub struct ListFilter {
     pub now_secs: u64,
     pub limit: u32,
     pub include_pruned: bool,
+    /// If non-empty, only this owner's rows. Empty means no owner filter.
+    pub owner: String,
 }
 
 impl Default for ListFilter {
@@ -136,16 +155,17 @@ impl Default for ListFilter {
             now_secs: now_secs(),
             limit: 50,
             include_pruned: false,
+            owner: String::new(),
         }
     }
 }
 
 trait Backend: Send + Sync {
-    fn load(&self, id: &str) -> Result<Option<Conversation>>;
+    fn load(&self, id: &str, owner: &str) -> Result<Option<Conversation>>;
     fn save(&self, conv: &Conversation) -> Result<()>;
     fn list(&self, filter: &ListFilter) -> Result<Vec<Conversation>>;
-    fn prune(&self, id: &str, pruned_at: u64) -> Result<bool>;
-    fn purge(&self, id: &str) -> Result<bool>;
+    fn prune(&self, id: &str, owner: &str, pruned_at: u64) -> Result<bool>;
+    fn purge(&self, id: &str, owner: &str) -> Result<bool>;
     fn add_image(
         &self,
         conversation_id: &str,
@@ -165,6 +185,7 @@ pub struct Store {
     backend: std::sync::Arc<dyn Backend>,
     crypto: Option<Crypto>,
     max_image_bytes: u64,
+    owner: String,
 }
 
 impl Store {
@@ -196,7 +217,15 @@ impl Store {
             }
             StoreKind::Postgres => Self::open_postgres(&cfg.store)?,
         };
+        if kind == StoreKind::Postgres && cfg.store.encryption_key.trim().is_empty() {
+            anyhow::bail!(
+                "postgres requires store.encryption_key in {} (or CONVERSATION_HANDOFF_ENCRYPTION_KEY). Title, summary, and notes stay ciphertext without that key.",
+                crate::config::config_path().display()
+            );
+        }
+        let owner = cfg.store.resolved_owner(kind)?;
         let store = store.with_max_image_bytes(cfg.store.max_image_bytes);
+        let store = store.with_owner(&owner);
         store.with_encryption(cfg.store.encryption_key.trim())
     }
 
@@ -211,6 +240,19 @@ impl Store {
 
     pub fn max_image_bytes(&self) -> u64 {
         self.max_image_bytes
+    }
+
+    pub fn with_owner(mut self, owner: &str) -> Self {
+        self.owner = owner.trim().to_string();
+        self
+    }
+
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    pub fn has_encryption(&self) -> bool {
+        self.crypto.is_some()
     }
 
     pub fn with_encryption(mut self, key: &str) -> Result<Self> {
@@ -247,6 +289,7 @@ impl Store {
             backend: std::sync::Arc::new(backend),
             crypto: None,
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+            owner: String::new(),
         })
     }
 
@@ -255,22 +298,24 @@ impl Store {
             backend: std::sync::Arc::new(postgres::PostgresBackend::connect(cfg)?),
             crypto: None,
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+            owner: String::new(),
         })
     }
 
     pub fn load(&self, id: &str) -> Result<Option<Conversation>> {
-        let Some(mut conv) = self.backend.load(id)? else {
+        let Some(conv) = self.backend.load(id, &self.owner)? else {
             return Ok(None);
         };
-        if let Some(crypto) = &self.crypto {
-            conv = crypto.decrypt_conv(conv)?;
-        }
+        let Some(mut conv) = self.decode_conv(conv)? else {
+            return Ok(None);
+        };
         conv.images = self.list_images(&conv.id)?;
         Ok(Some(conv))
     }
 
     pub fn save(&self, conv: &Conversation) -> Result<()> {
         let mut conv = conv.clone();
+        conv.owner = self.owner.clone();
         conv.sync_chunk_count();
         match &self.crypto {
             Some(crypto) => self.backend.save(&crypto.encrypt_conv(&conv)?),
@@ -279,23 +324,40 @@ impl Store {
     }
 
     pub fn list(&self, filter: &ListFilter) -> Result<Vec<Conversation>> {
-        let rows = self.backend.list(filter)?;
+        let mut filter = filter.clone();
+        filter.owner = self.owner.clone();
+        let rows = self.backend.list(&filter)?;
         let mut out = Vec::with_capacity(rows.len());
-        for mut conv in rows {
-            if let Some(crypto) = &self.crypto {
-                conv = crypto.decrypt_conv(conv)?;
+        for conv in rows {
+            if let Some(conv) = self.decode_conv(conv)? {
+                out.push(conv);
             }
-            out.push(conv);
         }
         Ok(out)
     }
 
+    fn decode_conv(&self, conv: Conversation) -> Result<Option<Conversation>> {
+        match &self.crypto {
+            Some(crypto) => match crypto.decrypt_conv(conv) {
+                Ok(conv) => Ok(Some(conv)),
+                Err(_) => Ok(None),
+            },
+            None => {
+                if conv.has_ciphertext() {
+                    Ok(None)
+                } else {
+                    Ok(Some(conv))
+                }
+            }
+        }
+    }
+
     pub fn prune(&self, id: &str) -> Result<bool> {
-        self.backend.prune(id, now_secs())
+        self.backend.prune(id, &self.owner, now_secs())
     }
 
     pub fn purge(&self, id: &str) -> Result<bool> {
-        self.backend.purge(id)
+        self.backend.purge(id, &self.owner)
     }
 
     pub fn add_image(
@@ -306,17 +368,28 @@ impl Store {
         bytes: &[u8],
         source: Option<&str>,
     ) -> Result<ImageMeta> {
+        if self.load(conversation_id)?.is_none() {
+            anyhow::bail!("unknown conversation_id {conversation_id}");
+        }
         let byte_len = bytes.len() as u64;
-        let (stored, caption) = match &self.crypto {
+        let (stored, caption, source) = match &self.crypto {
             Some(crypto) => {
                 let stored = crypto.encrypt_bytes(bytes)?;
                 let caption = match caption {
                     Some(c) => Some(crypto.encrypt_text(c)?),
                     None => None,
                 };
-                (stored, caption)
+                let source = match source {
+                    Some(s) => Some(crypto.encrypt_text(s)?),
+                    None => None,
+                };
+                (stored, caption, source)
             }
-            None => (bytes.to_vec(), caption.map(str::to_string)),
+            None => (
+                bytes.to_vec(),
+                caption.map(str::to_string),
+                source.map(str::to_string),
+            ),
         };
         let mut meta = self.backend.add_image(
             conversation_id,
@@ -324,11 +397,15 @@ impl Store {
             mime,
             &stored,
             byte_len,
-            source,
+            source.as_deref(),
         )?;
         if let Some(crypto) = &self.crypto {
             meta.caption = match meta.caption {
-                Some(c) => Some(crypto.decrypt_text(&c)?),
+                Some(c) => crypto.decrypt_text(&c).ok(),
+                None => None,
+            };
+            meta.source = match meta.source {
+                Some(s) => crypto.decrypt_text(&s).ok(),
                 None => None,
             };
         }
@@ -336,30 +413,63 @@ impl Store {
     }
 
     pub fn load_image(&self, conversation_id: &str, seq: i64) -> Result<Option<ImageBlob>> {
+        if self.backend.load(conversation_id, &self.owner)?.is_none() {
+            return Ok(None);
+        }
         let Some(mut blob) = self.backend.load_image(conversation_id, seq)? else {
             return Ok(None);
         };
         if let Some(crypto) = &self.crypto {
             if blob.meta.has_bytes {
-                blob.bytes = crypto.decrypt_bytes(&blob.bytes)?;
+                match crypto.decrypt_bytes(&blob.bytes) {
+                    Ok(bytes) => blob.bytes = bytes,
+                    Err(_) => return Ok(None),
+                }
+            } else if Crypto::is_ciphertext_bytes(&blob.bytes) {
+                return Ok(None);
             }
             blob.meta.caption = match blob.meta.caption {
-                Some(c) => Some(crypto.decrypt_text(&c)?),
+                Some(c) => crypto.decrypt_text(&c).ok(),
                 None => None,
             };
+            blob.meta.source = match blob.meta.source {
+                Some(s) => crypto.decrypt_text(&s).ok(),
+                None => None,
+            };
+        } else if Crypto::is_ciphertext_bytes(&blob.bytes)
+            || blob
+                .meta
+                .caption
+                .as_deref()
+                .is_some_and(Crypto::is_ciphertext_text)
+        {
+            return Ok(None);
         }
         Ok(Some(blob))
     }
 
     pub fn list_images(&self, conversation_id: &str) -> Result<Vec<ImageMeta>> {
+        if self.backend.load(conversation_id, &self.owner)?.is_none() {
+            return Ok(Vec::new());
+        }
         let mut images = self.backend.list_images(conversation_id)?;
         if let Some(crypto) = &self.crypto {
             for img in &mut images {
                 img.caption = match &img.caption {
-                    Some(c) => Some(crypto.decrypt_text(c)?),
+                    Some(c) => crypto.decrypt_text(c).ok(),
+                    None => None,
+                };
+                img.source = match &img.source {
+                    Some(s) => crypto.decrypt_text(s).ok(),
                     None => None,
                 };
             }
+        } else {
+            images.retain(|img| {
+                !img.caption
+                    .as_deref()
+                    .is_some_and(Crypto::is_ciphertext_text)
+            });
         }
         Ok(images)
     }
@@ -502,7 +612,7 @@ mod tests {
             .unwrap()
             .with_encryption("unit-test-key")
             .unwrap();
-        let mut conv = Conversation::new("c1", None);
+        let mut conv = Conversation::new("c1", Some("parent-secret".into()));
         conv.title = Some("secret title".into());
         conv.created_at = 1;
         conv.latest_message = Some("do not leak".into());
@@ -515,6 +625,8 @@ mod tests {
         assert_eq!(loaded.brief.as_deref(), Some("brief secret"));
         assert_eq!(loaded.summary.as_deref(), Some("summary secret"));
         assert_eq!(loaded.chunks, vec!["chunk secret"]);
+        assert_eq!(loaded.parent_id.as_deref(), Some("parent-secret"));
+        assert_eq!(loaded.title.as_deref(), Some("secret title"));
 
         let conn = rusqlite::Connection::open(&path).unwrap();
         let brief: String = conn
@@ -526,13 +638,40 @@ mod tests {
             .unwrap();
         assert!(brief.starts_with("enc:v1:"), "{brief}");
         assert!(!brief.contains("brief secret"));
+        let title: String = conn
+            .query_row(
+                "SELECT title FROM conversations WHERE id = 'c1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(title.starts_with("enc:v1:"), "{title}");
+        assert!(!title.contains("secret title"));
+        let parent: String = conn
+            .query_row(
+                "SELECT parent_id FROM conversations WHERE id = 'c1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(parent.starts_with("enc:v1:"), "{parent}");
+        assert!(!parent.contains("parent-secret"));
+        let summary: String = conn
+            .query_row(
+                "SELECT summary FROM conversations WHERE id = 'c1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(summary.starts_with("enc:v1:"), "{summary}");
+        assert!(!summary.contains("summary secret"));
 
         let version: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
                 row.get(0)
             })
             .unwrap();
-        assert!(version >= 2);
+        assert!(version >= 3);
     }
 
     const TINY_PNG: &[u8] = &[
@@ -625,6 +764,7 @@ mod tests {
                 now_secs: 200,
                 limit: 50,
                 include_pruned: false,
+                owner: String::new(),
             })
             .unwrap();
         let ids: Vec<_> = listed.iter().map(|c| c.id.as_str()).collect();
@@ -651,6 +791,7 @@ mod tests {
             pruned_at: None,
             chunk_count: 0,
             images: vec![],
+            owner: String::new(),
         };
         std::fs::write(
             json_dir.join("legacy1.json"),
@@ -665,5 +806,63 @@ mod tests {
         assert_eq!(loaded.chunks, vec!["imported chunk"]);
         assert_eq!(loaded.chunk_count, 1);
         assert_eq!(loaded.updated_at, 42);
+    }
+
+    #[test]
+    fn owner_isolates_list_and_load() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("owners.db");
+        let alice = Store::open_sqlite(&path).unwrap().with_owner("alice");
+        let bob = Store::open_sqlite(&path).unwrap().with_owner("bob");
+
+        let mut a = Conversation::new("a1", None);
+        a.summary = Some("alice work".into());
+        alice.save(&a).unwrap();
+        let mut b = Conversation::new("b1", None);
+        b.summary = Some("bob work".into());
+        bob.save(&b).unwrap();
+
+        let alice_ids: Vec<_> = alice
+            .list(&ListFilter::default())
+            .unwrap()
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        assert_eq!(alice_ids, vec!["a1"]);
+        assert!(bob.load("a1").unwrap().is_none());
+        assert_eq!(
+            alice.load("a1").unwrap().unwrap().summary.as_deref(),
+            Some("alice work")
+        );
+
+        let err = bob.save(&a).unwrap_err().to_string();
+        assert!(err.contains("another owner"), "{err}");
+    }
+
+    #[test]
+    fn wrong_key_hides_topic_and_summary() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("keys.db");
+        let writer = Store::open_sqlite(&path)
+            .unwrap()
+            .with_owner("alice")
+            .with_encryption("key-a")
+            .unwrap();
+        let mut conv = Conversation::new("c1", None);
+        conv.title = Some("secret topic".into());
+        conv.summary = Some("secret summary".into());
+        writer.save(&conv).unwrap();
+
+        let other_key = Store::open_sqlite(&path)
+            .unwrap()
+            .with_owner("alice")
+            .with_encryption("key-b")
+            .unwrap();
+        assert!(other_key.list(&ListFilter::default()).unwrap().is_empty());
+        assert!(other_key.load("c1").unwrap().is_none());
+
+        let no_key = Store::open_sqlite(&path).unwrap().with_owner("alice");
+        assert!(no_key.list(&ListFilter::default()).unwrap().is_empty());
+        assert!(no_key.load("c1").unwrap().is_none());
     }
 }

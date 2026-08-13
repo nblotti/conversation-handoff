@@ -70,15 +70,16 @@ fn open_client(cfg: &StoreConfig) -> Result<Client> {
 }
 
 impl Backend for PostgresBackend {
-    fn load(&self, id: &str) -> Result<Option<Conversation>> {
+    fn load(&self, id: &str, owner: &str) -> Result<Option<Conversation>> {
         let id = id.to_string();
+        let owner = owner.to_string();
         self.with_client(move |client| {
             let row = client
                 .query_opt(
                     "SELECT id, parent_id, title, created_at, latest_message, brief, chunks,
-                            summary, status, updated_at, last_saved_at, pruned_at, chunk_count
-                     FROM conversations WHERE id = $1",
-                    &[&id],
+                            summary, status, updated_at, last_saved_at, pruned_at, chunk_count, owner
+                     FROM conversations WHERE id = $1 AND ($2 = '' OR owner = $2)",
+                    &[&id, &owner],
                 )
                 .context("postgres load")?;
             match row {
@@ -102,8 +103,9 @@ impl Backend for PostgresBackend {
         let brief = conv.brief.clone();
         let summary = conv.summary.clone();
         let status = conv.status.as_str().to_string();
+        let owner = conv.owner.clone();
         self.with_client(move |client| {
-            let params: [&(dyn ToSql + Sync); 13] = [
+            let params: [&(dyn ToSql + Sync); 14] = [
                 &id,
                 &parent_id,
                 &title,
@@ -117,14 +119,15 @@ impl Backend for PostgresBackend {
                 &last_saved,
                 &pruned,
                 &chunk_count,
+                &owner,
             ];
-            client
+            let n = client
                 .execute(
                     "INSERT INTO conversations (
                     id, parent_id, title, created_at, latest_message, brief, chunks,
-                    summary, status, updated_at, last_saved_at, pruned_at, chunk_count
+                    summary, status, updated_at, last_saved_at, pruned_at, chunk_count, owner
                  )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                  ON CONFLICT (id) DO UPDATE SET
                    parent_id = EXCLUDED.parent_id,
                    title = EXCLUDED.title,
@@ -137,10 +140,15 @@ impl Backend for PostgresBackend {
                    updated_at = EXCLUDED.updated_at,
                    last_saved_at = EXCLUDED.last_saved_at,
                    pruned_at = EXCLUDED.pruned_at,
-                   chunk_count = EXCLUDED.chunk_count",
+                   chunk_count = EXCLUDED.chunk_count,
+                   owner = EXCLUDED.owner
+                 WHERE conversations.owner = EXCLUDED.owner",
                     &params,
                 )
                 .context("postgres save")?;
+            if n == 0 {
+                save_conflict(client, &id)?;
+            }
             Ok(())
         })
     }
@@ -153,17 +161,19 @@ impl Backend for PostgresBackend {
             .map(|d| filter.now_secs.saturating_sub(d) as i64)
             .unwrap_or(0);
         let limit = filter.limit.max(1) as i64;
+        let owner = filter.owner.clone();
         self.with_client(move |client| {
             let rows = client
                 .query(
                     "SELECT id, parent_id, title, created_at, latest_message, brief, chunks,
-                            summary, status, updated_at, last_saved_at, pruned_at, chunk_count
+                            summary, status, updated_at, last_saved_at, pruned_at, chunk_count, owner
                      FROM conversations
                      WHERE ($1 OR status != 'pruned')
                        AND (NOT $2 OR updated_at < $3)
+                       AND ($5 = '' OR owner = $5)
                      ORDER BY updated_at DESC
                      LIMIT $4",
-                    &[&include_pruned, &has_cutoff, &cutoff, &limit],
+                    &[&include_pruned, &has_cutoff, &cutoff, &limit, &owner],
                 )
                 .context("postgres list")?;
             let mut out = Vec::new();
@@ -176,8 +186,9 @@ impl Backend for PostgresBackend {
         })
     }
 
-    fn prune(&self, id: &str, pruned_at: u64) -> Result<bool> {
+    fn prune(&self, id: &str, owner: &str, pruned_at: u64) -> Result<bool> {
         let id = id.to_string();
+        let owner = owner.to_string();
         let pruned_at = pruned_at as i64;
         self.with_client(move |client| {
             let n = client
@@ -188,28 +199,39 @@ impl Backend for PostgresBackend {
                     status = 'pruned',
                     pruned_at = $2,
                     updated_at = $2
-                 WHERE id = $1 AND status != 'pruned'",
-                    &[&id, &pruned_at],
+                 WHERE id = $1 AND status != 'pruned' AND ($3 = '' OR owner = $3)",
+                    &[&id, &pruned_at, &owner],
                 )
                 .context("postgres prune conversation")?;
-            client
-                .execute(
-                    "UPDATE images SET bytes = NULL WHERE conversation_id = $1",
-                    &[&id],
-                )
-                .context("postgres prune images")?;
+            if n > 0 {
+                client
+                    .execute(
+                        "UPDATE images SET bytes = NULL WHERE conversation_id = $1",
+                        &[&id],
+                    )
+                    .context("postgres prune images")?;
+            }
             Ok(n > 0)
         })
     }
 
-    fn purge(&self, id: &str) -> Result<bool> {
+    fn purge(&self, id: &str, owner: &str) -> Result<bool> {
         let id = id.to_string();
+        let owner = owner.to_string();
         self.with_client(move |client| {
             client
-                .execute("DELETE FROM images WHERE conversation_id = $1", &[&id])
+                .execute(
+                    "DELETE FROM images WHERE conversation_id = $1 AND EXISTS (
+                        SELECT 1 FROM conversations c WHERE c.id = $1 AND ($2 = '' OR c.owner = $2)
+                     )",
+                    &[&id, &owner],
+                )
                 .context("postgres purge images")?;
             let n = client
-                .execute("DELETE FROM conversations WHERE id = $1", &[&id])
+                .execute(
+                    "DELETE FROM conversations WHERE id = $1 AND ($2 = '' OR owner = $2)",
+                    &[&id, &owner],
+                )
                 .context("postgres purge conversation")?;
             Ok(n > 0)
         })
@@ -354,7 +376,16 @@ fn row_to_conv(row: &Row) -> Result<Conversation> {
         pruned_at: row.get::<_, Option<i64>>(11).map(|v| v as u64),
         chunk_count: row.get::<_, i64>(12) as usize,
         images: Vec::new(),
+        owner: row.get(13),
     })
+}
+
+fn save_conflict(client: &mut Client, id: &str) -> Result<()> {
+    let existing = client.query_opt("SELECT owner FROM conversations WHERE id = $1", &[&id])?;
+    if existing.is_some() {
+        anyhow::bail!("conversation {id} belongs to another owner");
+    }
+    anyhow::bail!("failed to save conversation {id}");
 }
 
 fn connect(cfg: &StoreConfig) -> Result<Client> {

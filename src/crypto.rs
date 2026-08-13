@@ -89,10 +89,18 @@ impl Crypto {
             .map_err(|_| anyhow::anyhow!("failed to decrypt image; check store.encryption_key"))
     }
 
+    pub fn is_ciphertext_text(value: &str) -> bool {
+        value.starts_with(PREFIX)
+    }
+
+    pub fn is_ciphertext_bytes(value: &[u8]) -> bool {
+        value.starts_with(BYTE_MAGIC)
+    }
+
     pub fn encrypt_conv(&self, conv: &Conversation) -> Result<Conversation> {
         Ok(Conversation {
             id: conv.id.clone(),
-            parent_id: conv.parent_id.clone(),
+            parent_id: map_opt(&conv.parent_id, |s| self.encrypt_text(s))?,
             title: map_opt(&conv.title, |s| self.encrypt_text(s))?,
             created_at: conv.created_at,
             latest_message: map_opt(&conv.latest_message, |s| self.encrypt_text(s))?,
@@ -108,12 +116,14 @@ impl Crypto {
             last_saved_at: conv.last_saved_at,
             pruned_at: conv.pruned_at,
             chunk_count: conv.chunk_count,
+            owner: conv.owner.clone(),
             images: Vec::new(),
         })
     }
 
     pub fn decrypt_conv(&self, conv: Conversation) -> Result<Conversation> {
         Ok(Conversation {
+            parent_id: map_opt(&conv.parent_id, |s| self.decrypt_text(s))?,
             title: map_opt(&conv.title, |s| self.decrypt_text(s))?,
             latest_message: map_opt(&conv.latest_message, |s| self.decrypt_text(s))?,
             brief: map_opt(&conv.brief, |s| self.decrypt_text(s))?,

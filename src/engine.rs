@@ -137,6 +137,14 @@ impl Engine {
         Self { store }
     }
 
+    pub fn help(&self) -> crate::help::HelpResult {
+        crate::help::build(
+            crate::config::config_path().display().to_string(),
+            self.store.owner().to_string(),
+            self.store.has_encryption(),
+        )
+    }
+
     pub fn save(
         &self,
         conversation_id: &str,
@@ -454,6 +462,7 @@ impl Engine {
                 now_secs: now,
                 limit,
                 include_pruned,
+                owner: String::new(),
             })?
         };
 

@@ -33,14 +33,14 @@ impl SqliteBackend {
 }
 
 impl Backend for SqliteBackend {
-    fn load(&self, id: &str) -> Result<Option<Conversation>> {
+    fn load(&self, id: &str, owner: &str) -> Result<Option<Conversation>> {
         let conn = self.connect()?;
         let row = conn
             .query_row(
                 "SELECT id, parent_id, title, created_at, latest_message, brief, chunks,
-                        summary, status, updated_at, last_saved_at, pruned_at, chunk_count
-                 FROM conversations WHERE id = ?1",
-                params![id],
+                        summary, status, updated_at, last_saved_at, pruned_at, chunk_count, owner
+                 FROM conversations WHERE id = ?1 AND (?2 = '' OR owner = ?2)",
+                params![id, owner],
                 row_to_tuple,
             )
             .optional()
@@ -54,12 +54,13 @@ impl Backend for SqliteBackend {
     fn save(&self, conv: &Conversation) -> Result<()> {
         let conn = self.connect()?;
         let chunks = encode_chunks(&conv.chunks)?;
-        conn.execute(
-            "INSERT INTO conversations (
+        let n = conn
+            .execute(
+                "INSERT INTO conversations (
                 id, parent_id, title, created_at, latest_message, brief, chunks,
-                summary, status, updated_at, last_saved_at, pruned_at, chunk_count
+                summary, status, updated_at, last_saved_at, pruned_at, chunk_count, owner
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET
                parent_id = excluded.parent_id,
                title = excluded.title,
@@ -72,24 +73,30 @@ impl Backend for SqliteBackend {
                updated_at = excluded.updated_at,
                last_saved_at = excluded.last_saved_at,
                pruned_at = excluded.pruned_at,
-               chunk_count = excluded.chunk_count",
-            params![
-                conv.id,
-                conv.parent_id,
-                conv.title,
-                conv.created_at as i64,
-                conv.latest_message,
-                conv.brief,
-                chunks,
-                conv.summary,
-                conv.status.as_str(),
-                conv.updated_at as i64,
-                conv.last_saved_at as i64,
-                conv.pruned_at.map(|v| v as i64),
-                conv.chunk_count as i64,
-            ],
-        )
-        .context("sqlite save")?;
+               chunk_count = excluded.chunk_count,
+               owner = excluded.owner
+             WHERE conversations.owner = excluded.owner",
+                params![
+                    conv.id,
+                    conv.parent_id,
+                    conv.title,
+                    conv.created_at as i64,
+                    conv.latest_message,
+                    conv.brief,
+                    chunks,
+                    conv.summary,
+                    conv.status.as_str(),
+                    conv.updated_at as i64,
+                    conv.last_saved_at as i64,
+                    conv.pruned_at.map(|v| v as i64),
+                    conv.chunk_count as i64,
+                    conv.owner,
+                ],
+            )
+            .context("sqlite save")?;
+        if n == 0 {
+            save_conflict(&conn, &conv.id)?;
+        }
         Ok(())
     }
 
@@ -108,16 +115,17 @@ impl Backend for SqliteBackend {
         let limit = filter.limit.max(1) as i64;
         let mut stmt = conn.prepare(
             "SELECT id, parent_id, title, created_at, latest_message, brief, chunks,
-                    summary, status, updated_at, last_saved_at, pruned_at, chunk_count
+                    summary, status, updated_at, last_saved_at, pruned_at, chunk_count, owner
              FROM conversations
              WHERE (?1 = 1 OR status != 'pruned')
                AND (?2 = 0 OR updated_at < ?3)
+               AND (?5 = '' OR owner = ?5)
              ORDER BY updated_at DESC
              LIMIT ?4",
         )?;
         let rows = stmt
             .query_map(
-                params![include_pruned, has_cutoff, cutoff, limit],
+                params![include_pruned, has_cutoff, cutoff, limit, filter.owner],
                 row_to_tuple,
             )
             .context("sqlite list")?;
@@ -130,7 +138,7 @@ impl Backend for SqliteBackend {
         Ok(out)
     }
 
-    fn prune(&self, id: &str, pruned_at: u64) -> Result<bool> {
+    fn prune(&self, id: &str, owner: &str, pruned_at: u64) -> Result<bool> {
         let mut conn = self.connect()?;
         let tx = conn.transaction().context("sqlite prune tx")?;
         let n = tx
@@ -141,26 +149,36 @@ impl Backend for SqliteBackend {
                     status = 'pruned',
                     pruned_at = ?2,
                     updated_at = ?2
-                 WHERE id = ?1 AND status != 'pruned'",
-                params![id, pruned_at as i64],
+                 WHERE id = ?1 AND status != 'pruned' AND (?3 = '' OR owner = ?3)",
+                params![id, pruned_at as i64, owner],
             )
             .context("sqlite prune conversation")?;
-        tx.execute(
-            "UPDATE images SET bytes = NULL WHERE conversation_id = ?1",
-            params![id],
-        )
-        .context("sqlite prune images")?;
+        if n > 0 {
+            tx.execute(
+                "UPDATE images SET bytes = NULL WHERE conversation_id = ?1",
+                params![id],
+            )
+            .context("sqlite prune images")?;
+        }
         tx.commit().context("sqlite prune commit")?;
         Ok(n > 0)
     }
 
-    fn purge(&self, id: &str) -> Result<bool> {
+    fn purge(&self, id: &str, owner: &str) -> Result<bool> {
         let mut conn = self.connect()?;
         let tx = conn.transaction().context("sqlite purge tx")?;
-        tx.execute("DELETE FROM images WHERE conversation_id = ?1", params![id])
-            .context("sqlite purge images")?;
+        tx.execute(
+            "DELETE FROM images WHERE conversation_id = ?1 AND EXISTS (
+                SELECT 1 FROM conversations c WHERE c.id = ?1 AND (?2 = '' OR c.owner = ?2)
+             )",
+            params![id, owner],
+        )
+        .context("sqlite purge images")?;
         let n = tx
-            .execute("DELETE FROM conversations WHERE id = ?1", params![id])
+            .execute(
+                "DELETE FROM conversations WHERE id = ?1 AND (?2 = '' OR owner = ?2)",
+                params![id, owner],
+            )
             .context("sqlite purge conversation")?;
         tx.commit().context("sqlite purge commit")?;
         Ok(n > 0)
@@ -298,6 +316,7 @@ type ConvTuple = (
     i64,
     Option<i64>,
     i64,
+    String,
 );
 
 fn row_to_tuple(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConvTuple> {
@@ -315,6 +334,7 @@ fn row_to_tuple(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConvTuple> {
         row.get(10)?,
         row.get(11)?,
         row.get(12)?,
+        row.get(13)?,
     ))
 }
 
@@ -333,6 +353,7 @@ fn tuple_to_conv(tuple: ConvTuple) -> Result<Conversation> {
         last_saved_at,
         pruned_at,
         chunk_count,
+        owner,
     ) = tuple;
     Ok(Conversation {
         id,
@@ -349,5 +370,21 @@ fn tuple_to_conv(tuple: ConvTuple) -> Result<Conversation> {
         pruned_at: pruned_at.map(|v| v as u64),
         chunk_count: chunk_count as usize,
         images: Vec::new(),
+        owner,
     })
+}
+
+fn save_conflict(conn: &Connection, id: &str) -> Result<()> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT owner FROM conversations WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("sqlite save conflict")?;
+    if existing.is_some() {
+        anyhow::bail!("conversation {id} belongs to another owner");
+    }
+    anyhow::bail!("failed to save conversation {id}");
 }
