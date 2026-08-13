@@ -41,7 +41,7 @@ Then start a new session and approve the tools. If the prebuilt binary cannot ru
 
 ## Config (shared Postgres)
 
-`owner` and `encryption_key` go in the YAML config, under `store:` (not in chat):
+`owner` and `encryption_key` go in the YAML config, under `store:` (not in chat, not as a tool argument):
 
 - Linux: `~/.config/conversation-handoff/config.yaml`
 - Windows: `%APPDATA%\conversation-handoff\config.yaml`

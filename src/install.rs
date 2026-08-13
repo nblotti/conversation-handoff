@@ -227,6 +227,7 @@ When the context window is nearly full:
 3. If the user asks to look in the past conversation, call `recall`. A specific question finds matching parts.
 4. During long sessions, call `save` with work since `last_saved_at`.
 5. Chat commands: `/handoff` (save text + images), `/handoff new`, `/handoff list`, `/handoff use <id>`, `/handoff rm <id>`, `/handoff img <path>`, `/handoff help`.
+6. Never pass `owner` to a tool. Set `store.owner` in `~/.config/conversation-handoff/config.yaml` (Windows: `%APPDATA%\\conversation-handoff\\config.yaml`) or `CONVERSATION_HANDOFF_OWNER`. Example: `store.owner: nblotti`.
 "
 }
 

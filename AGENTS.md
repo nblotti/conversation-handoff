@@ -11,3 +11,5 @@ If the user asks to look in the past conversation, call `recall`. A specific que
 User chat commands: `/handoff` (save text + images since last checkpoint), `/handoff new`, `/handoff list`, `/handoff use <id>`, `/handoff rm <id>`, `/handoff img <path>`, `/handoff help`.
 
 Do not dump a full transcript into `context`.
+
+Never pass `owner` to a tool. Isolation comes from `store.owner` in `~/.config/conversation-handoff/config.yaml` (or `%APPDATA%\conversation-handoff\config.yaml` on Windows), or `CONVERSATION_HANDOFF_OWNER`. Example: `store.owner: nblotti`. The server stamps every save with that value. If postgres `owner` is empty, it uses `$USER`.

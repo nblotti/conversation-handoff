@@ -25,6 +25,8 @@ Workflow:
 7. load and recall return image references like id#1, never the pixels. Call get_image with that reference when you need to see the picture.
 8. A continuation can itself be handed off. Chains can be arbitrarily long.
 
+Never pass owner to a tool. The server reads store.owner from config.yaml (Linux: ~/.config/conversation-handoff/config.yaml) or CONVERSATION_HANDOFF_OWNER. Example: store.owner: nblotti. If postgres owner is empty, it uses $USER.
+
 Never dump an entire transcript into handoff context. Never ask the user to copy a long continuation pack.";
 
 #[derive(Clone)]
