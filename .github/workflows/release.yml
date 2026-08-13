@@ -1,0 +1,38 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        run: cp target/release/conversation-handoff conversation-handoff-linux-x86_64
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: conversation-handoff-linux-x86_64
+          generate_release_notes: true
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        run: copy target\release\conversation-handoff.exe conversation-handoff-windows-x86_64.exe
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: conversation-handoff-windows-x86_64.exe
+          generate_release_notes: true

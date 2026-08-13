@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "conversation-handoff": {
+      "type": "stdio",
+      "command": "conversation-handoff"
+    }
+  }
+}
