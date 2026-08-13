@@ -1,0 +1,22 @@
+# conversation-handoff storage
+#
+# type:
+#   file      JSON files (default)
+#   sqlite    local embedded database (like H2)
+#   postgres  PostgreSQL
+#
+# url:
+#   file      directory for JSON files (empty = platform data dir)
+#   sqlite    path to the .db file (empty = platform data dir / handoff.db)
+#   postgres  host:port/database  or  postgres://user:pass@host:port/database
+#
+# user / password: postgres. password may also come from
+# CONVERSATION_HANDOFF_DB_PASSWORD.
+#
+# ssl: postgres only, default true. Set false for a local server without TLS.
+
+store:
+  type: file
+  url: ""
+  user: ""
+  password: ""

@@ -127,8 +127,31 @@ conversation-handoff install --write-instructions
 
 ## Data
 
-Stored locally, one JSON file per conversation:
+Default is JSON files on disk:
 
 - Linux: `~/.local/share/conversation-handoff/`
 - Windows: `%APPDATA%\conversation-handoff\`
 - Override: `CONVERSATION_HANDOFF_HOME`
+
+To use SQLite (local embedded DB, like H2) or PostgreSQL, write a YAML config:
+
+```bash
+conversation-handoff init-config
+```
+
+That creates `~/.config/conversation-handoff/config.yaml` (Linux) or `%APPDATA%\conversation-handoff\config.yaml` (Windows). Override the path with `CONVERSATION_HANDOFF_CONFIG`.
+
+```yaml
+store:
+  type: postgres          # file | sqlite | postgres
+  url: "db.example.com:5432/conversation_handoff"
+  user: handoff
+  password: "change-me"
+  ssl: true               # optional; omit to try TLS then plain
+```
+
+`type: sqlite` stores an embedded database at `url` (or `handoff.db` in the data dir if `url` is empty). `type: h2` and `type: local` are aliases for sqlite.
+
+For postgres, `url` can also be `postgres://user:pass@host:5432/dbname`. `user` / `password` in the file override the URL. The password can come from `CONVERSATION_HANDOFF_DB_PASSWORD` instead of the YAML file.
+
+See `config.example.yaml` in the repo.

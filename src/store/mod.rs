@@ -1,8 +1,13 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::config::{Config, StoreKind};
+
+mod file;
+mod postgres;
+mod sqlite;
 
 const MAX_CHAIN: usize = 64;
 
@@ -22,46 +27,67 @@ pub struct Conversation {
     pub chunks: Vec<String>,
 }
 
+trait Backend: Send + Sync {
+    fn load(&self, id: &str) -> Result<Option<Conversation>>;
+    fn save(&self, conv: &Conversation) -> Result<()>;
+}
+
 #[derive(Clone)]
 pub struct Store {
-    dir: PathBuf,
+    backend: std::sync::Arc<dyn Backend>,
 }
 
 impl Store {
     pub fn open() -> Result<Self> {
-        Self::open_at(default_dir())
+        Self::from_config(&Config::load()?)
+    }
+
+    pub fn from_config(cfg: &Config) -> Result<Self> {
+        match cfg.store.kind()? {
+            StoreKind::File => {
+                let dir = if cfg.store.url.trim().is_empty() {
+                    default_dir()
+                } else {
+                    PathBuf::from(cfg.store.url.trim())
+                };
+                Self::open_at(dir)
+            }
+            StoreKind::Sqlite => {
+                let path = if cfg.store.url.trim().is_empty() {
+                    default_sqlite_path()
+                } else {
+                    PathBuf::from(cfg.store.url.trim())
+                };
+                Self::open_sqlite(&path)
+            }
+            StoreKind::Postgres => Self::open_postgres(&cfg.store),
+        }
     }
 
     pub fn open_at(dir: impl Into<PathBuf>) -> Result<Self> {
-        let dir = dir.into();
-        fs::create_dir_all(&dir)
-            .with_context(|| format!("create data dir {}", dir.display()))?;
-        Ok(Self { dir })
+        Ok(Self {
+            backend: std::sync::Arc::new(file::FileBackend::open(dir.into())?),
+        })
     }
 
-    pub fn dir(&self) -> &Path {
-        &self.dir
+    pub fn open_sqlite(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self {
+            backend: std::sync::Arc::new(sqlite::SqliteBackend::open(path.as_ref())?),
+        })
+    }
+
+    pub fn open_postgres(cfg: &crate::config::StoreConfig) -> Result<Self> {
+        Ok(Self {
+            backend: std::sync::Arc::new(postgres::PostgresBackend::connect(cfg)?),
+        })
     }
 
     pub fn load(&self, id: &str) -> Result<Option<Conversation>> {
-        let path = self.path_for(id);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let data = fs::read_to_string(&path)
-            .with_context(|| format!("read {}", path.display()))?;
-        let conv: Conversation = serde_json::from_str(&data)
-            .with_context(|| format!("parse {}", path.display()))?;
-        Ok(Some(conv))
+        self.backend.load(id)
     }
 
     pub fn save(&self, conv: &Conversation) -> Result<()> {
-        let path = self.path_for(&conv.id);
-        let tmp = path.with_extension("json.tmp");
-        let data = serde_json::to_string_pretty(conv)?;
-        fs::write(&tmp, data).with_context(|| format!("write {}", tmp.display()))?;
-        replace_file(&tmp, &path)?;
-        Ok(())
+        self.backend.save(conv)
     }
 
     pub fn get_or_create(&self, id: &str, parent_id: Option<String>) -> Result<Conversation> {
@@ -88,10 +114,10 @@ impl Store {
         let mut seen = std::collections::HashSet::new();
         while let Some(cid) = current {
             if !seen.insert(cid.clone()) {
-                bail!("conversation chain has a cycle at {cid}");
+                anyhow::bail!("conversation chain has a cycle at {cid}");
             }
             if out.len() >= MAX_CHAIN {
-                bail!("conversation chain is longer than {MAX_CHAIN} links");
+                anyhow::bail!("conversation chain is longer than {MAX_CHAIN} links");
             }
             match self.load(&cid)? {
                 Some(conv) => {
@@ -108,20 +134,23 @@ impl Store {
         }
         Ok(out)
     }
-
-    fn path_for(&self, id: &str) -> PathBuf {
-        self.dir.join(filename_for(id))
-    }
 }
 
 pub fn default_dir() -> PathBuf {
+    data_root().join("conversations")
+}
+
+pub fn default_sqlite_path() -> PathBuf {
+    data_root().join("handoff.db")
+}
+
+fn data_root() -> PathBuf {
     if let Ok(home) = std::env::var("CONVERSATION_HANDOFF_HOME") {
-        return PathBuf::from(home).join("conversations");
+        return PathBuf::from(home);
     }
     dirs::data_dir()
         .unwrap_or_else(|| std::env::temp_dir())
         .join("conversation-handoff")
-        .join("conversations")
 }
 
 pub fn now_secs() -> u64 {
@@ -131,43 +160,15 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn filename_for(id: &str) -> String {
-    let safe: String = id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if !safe.is_empty()
-        && safe.len() <= 120
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        format!("{safe}.json")
-    } else {
-        format!("{}.json", to_hex(id.as_bytes()))
-    }
+pub(crate) fn encode_chunks(chunks: &[String]) -> Result<String> {
+    serde_json::to_string(chunks).context("encode chunks")
 }
 
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn replace_file(tmp: &Path, dest: &Path) -> Result<()> {
-    #[cfg(windows)]
-    {
-        if dest.exists() {
-            fs::remove_file(dest)
-                .with_context(|| format!("remove {}", dest.display()))?;
-        }
+pub(crate) fn decode_chunks(raw: &str) -> Result<Vec<String>> {
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
     }
-    fs::rename(tmp, dest).with_context(|| format!("rename onto {}", dest.display()))?;
-    Ok(())
+    serde_json::from_str(raw).context("decode chunks")
 }
 
 #[cfg(test)]
@@ -175,10 +176,7 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[test]
-    fn round_trip_and_parent_chain() {
-        let dir = tempdir().unwrap();
-        let store = Store::open_at(dir.path()).unwrap();
+    fn sample_tree(store: &Store) {
         store
             .save(&Conversation {
                 id: "root".into(),
@@ -212,9 +210,35 @@ mod tests {
                 chunks: vec![],
             })
             .unwrap();
+    }
 
-        let chain = store.chain("grandchild").unwrap();
-        let ids: Vec<_> = chain.iter().map(|c| c.id.as_str()).collect();
+    #[test]
+    fn file_round_trip_and_parent_chain() {
+        let dir = tempdir().unwrap();
+        let store = Store::open_at(dir.path()).unwrap();
+        sample_tree(&store);
+        let ids: Vec<_> = store
+            .chain("grandchild")
+            .unwrap()
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        assert_eq!(ids, vec!["grandchild", "child", "root"]);
+    }
+
+    #[test]
+    fn sqlite_round_trip_and_parent_chain() {
+        let dir = tempdir().unwrap();
+        let store = Store::open_sqlite(dir.path().join("t.db")).unwrap();
+        sample_tree(&store);
+        let loaded = store.load("root").unwrap().unwrap();
+        assert_eq!(loaded.chunks, vec!["old work"]);
+        let ids: Vec<_> = store
+            .chain("grandchild")
+            .unwrap()
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
         assert_eq!(ids, vec!["grandchild", "child", "root"]);
     }
 

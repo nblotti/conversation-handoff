@@ -69,6 +69,12 @@ enum Command {
         #[arg(long)]
         conversation_id: String,
     },
+    /// Write a sample YAML config (file / sqlite / postgres).
+    InitConfig {
+        /// Where to write the file (defaults to the platform config path).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
     /// Register the MCP server with Claude Code and Codex.
     Install {
         /// Explicit path to this binary (defaults to the running executable).
@@ -123,6 +129,12 @@ async fn main() -> Result<()> {
         )?),
         Command::Thread { conversation_id } => {
             print_json(&engine()?.thread(&conversation_id)?)
+        }
+        Command::InitConfig { path } => {
+            let written = conversation_handoff::config::write_sample(path)?;
+            println!("Wrote {}", written.display());
+            println!("Edit store.type (file, sqlite, or postgres), url, user, and password.");
+            Ok(())
         }
         Command::Install {
             command,
