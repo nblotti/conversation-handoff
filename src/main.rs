@@ -35,7 +35,7 @@ enum Command {
         #[arg(long)]
         title: Option<String>,
     },
-    /// Link a full thread to a new conversation and print a latest-message brief.
+    /// Link a full thread to a new conversation and print a one-line reference.
     Handoff {
         #[arg(long)]
         thread_id: String,
@@ -50,12 +50,17 @@ enum Command {
         #[arg(long)]
         title: Option<String>,
     },
-    /// Search the parent chain for the parts that best match a query.
+    /// Load the stored brief for a continuation id.
+    Load {
+        #[arg(long)]
+        conversation_id: String,
+    },
+    /// Search the parent chain, or pull extra past context if query is omitted.
     Recall {
         #[arg(long)]
         conversation_id: String,
         #[arg(long)]
-        query: String,
+        query: Option<String>,
         #[arg(long)]
         max_results: Option<u32>,
     },
@@ -106,11 +111,16 @@ async fn main() -> Result<()> {
                 title,
             )?)
         }
+        Command::Load { conversation_id } => print_json(&engine()?.load(&conversation_id)?),
         Command::Recall {
             conversation_id,
             query,
             max_results,
-        } => print_json(&engine()?.recall(&conversation_id, &query, max_results)?),
+        } => print_json(&engine()?.recall(
+            &conversation_id,
+            query.as_deref(),
+            max_results,
+        )?),
         Command::Thread { conversation_id } => {
             print_json(&engine()?.thread(&conversation_id)?)
         }

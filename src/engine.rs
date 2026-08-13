@@ -11,12 +11,21 @@ const DEFAULT_RECALL_CHARS: usize = 4000;
 
 #[derive(Debug, Serialize)]
 pub struct HandoffResult {
+    /// One-line token to paste into the new chat. Nothing else.
+    pub reference: String,
     pub thread_id: String,
     pub new_conversation_id: String,
-    pub parent_chain: Vec<String>,
-    pub brief: String,
     pub stored_chunks: usize,
-    pub continuation_pack: String,
+    pub hint: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LoadResult {
+    pub conversation_id: String,
+    pub thread_id: Option<String>,
+    pub parent_chain: Vec<String>,
+    pub latest_message: Option<String>,
+    pub brief: Option<String>,
     pub hint: String,
 }
 
@@ -138,33 +147,46 @@ impl Engine {
         };
         self.store.save(&child)?;
 
-        let chain = self.store.chain(new_id)?;
-        let parent_chain: Vec<String> = chain.iter().map(|c| c.id.clone()).collect();
-        let continuation_pack = continuation_pack(new_id, thread_id, &brief, &parent_chain);
-
         Ok(HandoffResult {
+            reference: reference_line(new_id),
             thread_id: thread_id.to_string(),
             new_conversation_id: new_id.to_string(),
-            parent_chain,
-            brief,
             stored_chunks: chunks.len(),
-            continuation_pack,
             hint: format!(
-                "Start a new conversation as {new_id}. Paste continuation_pack as the first message. Call recall with conversation_id={new_id} when you need older detail."
+                "Show the user only this line: {}. In the new chat, call load with that id. Do not paste the brief.",
+                reference_line(new_id)
             ),
+        })
+    }
+
+    /// Pull the stored brief for a continuation chat. Accepts a raw id or a `conversation-handoff: id` line.
+    pub fn load(&self, conversation_id: &str) -> Result<LoadResult> {
+        let conversation_id = parse_id(conversation_id)?;
+        let conv = self.store.load(conversation_id)?.ok_or_else(|| {
+            anyhow::anyhow!("unknown conversation_id {conversation_id}. Call handoff first.")
+        })?;
+        let chain = self.store.chain(conversation_id)?;
+        let parent_chain: Vec<String> = chain.iter().map(|c| c.id.clone()).collect();
+        Ok(LoadResult {
+            conversation_id: conversation_id.to_string(),
+            thread_id: conv.parent_id.clone(),
+            parent_chain,
+            latest_message: conv.latest_message,
+            brief: conv.brief,
+            hint: "Work from this brief. If the user asks about the past conversation, or something is missing, call recall.".to_string(),
         })
     }
 
     pub fn recall(
         &self,
         conversation_id: &str,
-        query: &str,
+        query: Option<&str>,
         max_results: Option<u32>,
     ) -> Result<RecallResult> {
-        let conversation_id = require_id(conversation_id, "conversation_id")?;
-        let query = query.trim();
-        if query.is_empty() {
-            bail!("query is required — ask for the specific fact you need");
+        let conversation_id = parse_id(conversation_id)?;
+        let query = query.unwrap_or("").trim();
+        if query.is_empty() || is_broad_past_query(query) {
+            return self.browse_past(conversation_id, max_results);
         }
 
         let chain = self.store.chain(conversation_id)?;
@@ -223,8 +245,53 @@ impl Engine {
         })
     }
 
+    fn browse_past(
+        &self,
+        conversation_id: &str,
+        max_results: Option<u32>,
+    ) -> Result<RecallResult> {
+        let chain = self.store.chain(conversation_id)?;
+        if chain.is_empty() {
+            bail!("unknown conversation_id {conversation_id}. Call handoff or remember first.");
+        }
+        let parent_chain: Vec<String> = chain.iter().map(|c| c.id.clone()).collect();
+        let limit = max_results
+            .unwrap_or(DEFAULT_RECALL as u32)
+            .clamp(1, 20) as usize;
+
+        let mut matches = Vec::new();
+        let mut used = 0usize;
+        for conv in chain.iter().skip(1) {
+            for chunk in conv.chunks.iter().rev() {
+                if matches.len() >= limit || used >= DEFAULT_RECALL_CHARS {
+                    break;
+                }
+                used += chunk.len();
+                matches.push(RecallMatch {
+                    conversation_id: conv.id.clone(),
+                    score: 0.0,
+                    text: chunk.clone(),
+                });
+            }
+        }
+
+        let hint = if matches.is_empty() {
+            "No extra parent context stored. Try a more specific recall query.".to_string()
+        } else {
+            "Additional parts from parent conversations. Call recall again with a specific question to go deeper.".to_string()
+        };
+
+        Ok(RecallResult {
+            conversation_id: conversation_id.to_string(),
+            query: "(past conversation)".to_string(),
+            parent_chain,
+            matches,
+            hint,
+        })
+    }
+
     pub fn thread(&self, conversation_id: &str) -> Result<ThreadResult> {
-        let conversation_id = require_id(conversation_id, "conversation_id")?;
+        let conversation_id = parse_id(conversation_id)?;
         let chain = self.store.chain(conversation_id)?;
         if chain.is_empty() {
             bail!("unknown conversation_id {conversation_id}");
@@ -252,6 +319,33 @@ fn require_id<'a>(id: &'a str, name: &str) -> Result<&'a str> {
         bail!("{name} is required");
     }
     Ok(id)
+}
+
+fn parse_id(raw: &str) -> Result<&str> {
+    let raw = raw.trim();
+    let id = raw
+        .strip_prefix("conversation-handoff:")
+        .map(str::trim)
+        .unwrap_or(raw);
+    require_id(id, "conversation_id")
+}
+
+fn reference_line(id: &str) -> String {
+    format!("conversation-handoff: {id}")
+}
+
+fn is_broad_past_query(query: &str) -> bool {
+    let q = query.to_lowercase();
+    q.contains("past conversation")
+        || q.contains("previous conversation")
+        || q.contains("previous chat")
+        || q.contains("previous thread")
+        || q.contains("look in the past")
+        || q.contains("look in past")
+        || matches!(
+            q.trim(),
+            "past" | "history" | "earlier" | "before" | "parent" | "the past"
+        )
 }
 
 fn build_brief(latest_message: &str, chunks: &[String]) -> String {
@@ -309,21 +403,6 @@ fn build_brief(latest_message: &str, chunks: &[String]) -> String {
     out
 }
 
-fn continuation_pack(
-    new_id: &str,
-    thread_id: &str,
-    brief: &str,
-    chain: &[String],
-) -> String {
-    format!(
-        "Continue work as conversation `{new_id}` in thread `{thread_id}`.\n\
-         Parent chain (newest first): {}\n\n\
-         {brief}\n\n\
-         If you need older detail, call the conversation-handoff `recall` tool with conversation_id=`{new_id}` and a specific question. \
-         That search walks parent conversations recursively. Ask a narrower question to go deeper.",
-        chain.join(" -> ")
-    )
-}
 
 #[cfg(test)]
 mod tests {
@@ -353,14 +432,35 @@ mod tests {
 
         assert_eq!(result.thread_id, "t1");
         assert_eq!(result.new_conversation_id, "c2");
-        assert!(result.brief.contains("JWT_SECRET"));
-        assert!(result.brief.contains("Latest request"));
-        assert!(
-            result.brief.to_lowercase().contains("auth")
-                || result.brief.contains("JWT_SECRET")
-        );
-        assert!(result.parent_chain.contains(&"c2".to_string()));
-        assert!(result.parent_chain.contains(&"t1".to_string()));
+        assert_eq!(result.reference, "conversation-handoff: c2");
+        assert!(!result.reference.contains("JWT_SECRET"));
+
+        let loaded = engine.load("conversation-handoff: c2").unwrap();
+        assert_eq!(loaded.thread_id.as_deref(), Some("t1"));
+        let brief = loaded.brief.expect("stored brief");
+        assert!(brief.contains("JWT_SECRET"));
+        assert!(brief.contains("Latest request"));
+    }
+
+    #[test]
+    fn recall_without_query_returns_parent_context() {
+        let (_dir, engine) = engine();
+        engine
+            .handoff(
+                "root",
+                "child",
+                "continue",
+                "Decision: treat nested comments as whitespace.",
+                None,
+            )
+            .unwrap();
+        let recalled = engine
+            .recall("child", Some("look in past conversation"), None)
+            .unwrap();
+        assert!(recalled
+            .matches
+            .iter()
+            .any(|m| m.text.to_lowercase().contains("whitespace")));
     }
 
     #[test]
@@ -386,7 +486,7 @@ mod tests {
             .unwrap();
 
         let recalled = engine
-            .recall("leaf", "nested comments whitespace decision", None)
+            .recall("leaf", Some("nested comments whitespace decision"), None)
             .unwrap();
         assert_eq!(recalled.parent_chain, vec!["leaf", "mid", "root"]);
         assert!(!recalled.matches.is_empty());
@@ -402,7 +502,7 @@ mod tests {
         engine
             .remember("solo", "API base url is https://example.test/v2", None)
             .unwrap();
-        let recalled = engine.recall("solo", "api base url", None).unwrap();
+        let recalled = engine.recall("solo", Some("api base url"), None).unwrap();
         assert!(recalled.matches.iter().any(|m| m.text.contains("example.test")));
     }
 }

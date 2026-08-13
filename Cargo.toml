@@ -1,6 +1,6 @@
 [package]
 name = "conversation-handoff"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Hand off a full Claude or Codex conversation to a new chat, and recall only the parts that still matter."

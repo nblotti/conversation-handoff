@@ -203,12 +203,12 @@ pub fn instruction_block() -> &'static str {
     "\
 ## Conversation handoff
 
-When the context window is nearly full and work must continue:
+When the context window is nearly full:
 
-1. Call MCP tool `handoff` with this conversation's `thread_id`, a new `new_conversation_id`, the `latest_message`, and only the recent relevant `context` (not the full transcript).
-2. Give the user `continuation_pack` to paste as the first message of a new chat. Include the new conversation id.
-3. In the new chat, work from the brief. If you need older detail, call `recall` with your `conversation_id` and a specific query. That search walks parent threads recursively; ask a narrower question to go deeper.
-4. During long sessions, call `remember` to checkpoint facts before they fall out of the window.
+1. Call `handoff`. Show the user only the one-line `reference` (`conversation-handoff: <id>`). Do not paste a brief.
+2. In the new chat, call `load` with that id and work from the brief.
+3. If the user asks to look in the past conversation, call `recall`. A specific question finds matching parts.
+4. During long sessions, call `remember` to checkpoint facts.
 "
 }
 

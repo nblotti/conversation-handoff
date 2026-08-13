@@ -1,24 +1,24 @@
 ---
 name: conversation-handoff
-description: Hand off a full Claude or Codex conversation to a new chat when the context window is full, then recall only the stored parts that match a follow-up question. Use when context is full, the session must continue in a new conversation, a thread id and new conversation id are needed, or older parent-thread detail must be retrieved.
+description: Hand off a full Claude or Codex conversation to a new chat with a one-line reference, then load or recall stored context. Use when context is full, a message contains conversation-handoff:, the user asks to look in a past conversation, or older parent-thread detail is needed.
 ---
 
 # Conversation handoff
 
-Use the `conversation-handoff` MCP server. Do not dump a full transcript.
+Use the `conversation-handoff` MCP server. Never paste a long continuation pack.
 
 ## When the window is filling
 
-1. Call `remember` with the current conversation id and only durable facts (decisions, paths, errors, constraints).
-2. When the window is nearly full, call `handoff`:
-   - `thread_id`: this conversation
-   - `new_conversation_id`: a new unique id
-   - `latest_message`: the latest user request (the new chat continues from this)
-   - `context`: recent relevant notes only
-3. Give the user `continuation_pack` to paste as the first message of the new chat. Include the new conversation id.
+1. Call `remember` with durable facts only.
+2. Call `handoff` with `thread_id`, `new_conversation_id`, `latest_message`, and recent relevant `context`.
+3. Show the user **only** the `reference` line, for example:
 
-## In the continuation chat
+   `conversation-handoff: <new-id>`
 
-Work from the brief. If something is missing, call `recall` with your `conversation_id` and a **specific** question. Search walks parent conversations. A narrower question goes deeper. A continuation can `handoff` again.
+## In the new chat
 
-Call `thread` to inspect the parent chain.
+If the first message contains `conversation-handoff: <id>`, immediately call `load` with that id. Work from the returned brief.
+
+## When the user asks about the past
+
+If they say to look in the past conversation, previous thread, or that something is missing, call `recall` with the same id. Omit `query` (or pass their words) for extra parent context. Pass a specific question to find matching parts. Call again with a narrower question to go deeper.

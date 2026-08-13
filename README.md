@@ -2,7 +2,7 @@
 
 Hand off a **full Claude Code or Codex conversation** to a new chat when the context window is full.
 
-The new chat does not get the whole transcript. It gets a short brief about the **latest message**, plus a way to ask for older pieces later. Those lookups walk parent conversations, so a continuation can reach a thread that already has a parent.
+The new chat does not get the whole transcript. You paste a **one-line reference**. The new session calls `load` to pull the brief about the latest message, and `recall` if you ask about the past conversation. Lookups walk parent threads.
 
 You do **not** need Rust to run it. Download a release binary (or use the install script), then register it with Claude and Codex.
 
@@ -14,9 +14,12 @@ You do **not** need Rust to run it. Download a release binary (or use the instal
    - `new_conversation_id` — id for the next chat
    - `latest_message` — the latest user request
    - `context` — only the recent relevant notes (not the full history)
-3. You paste `continuation_pack` as the first message of the new chat.
-4. If the new chat needs older detail, it calls `recall` with a specific question. The tool returns the stored parts that match. A narrower question goes deeper.
-5. The new chat can `handoff` again. Threads nest.
+3. You paste **only** the one-line `reference` into the new chat:
+
+   `conversation-handoff: <new-id>`
+4. The new chat calls `load` with that id and works from the stored brief.
+5. If you say to look in the past conversation, it calls `recall`. A specific question finds matching parts; a vague request returns extra parent context.
+6. The new chat can `handoff` again. Threads nest.
 
 ## Install (no Rust)
 
@@ -82,7 +85,7 @@ Or put this in `~/.claude.json` (all projects) or a project `.mcp.json`:
 
 On Windows, set `command` to the full path of `conversation-handoff.exe` if Claude cannot see it on `PATH`.
 
-The skill in this repo (`.claude/skills/conversation-handoff/`) tells Claude when to hand off and how to call `recall`. After `install`, that skill is also in your user skills folder, so it works in every project.
+The skill in this repo (`.claude/skills/conversation-handoff/`) tells Claude when to hand off, to paste only the one-line reference, and to `load` / `recall` in the next chat. After `install`, that skill is also in your user skills folder, so it works in every project.
 
 ## Configure Codex
 
@@ -106,8 +109,9 @@ The skill in `.agents/skills/conversation-handoff/` (and copied to `~/.agents/sk
 | Tool | What it does |
 |------|----------------|
 | `remember` | Store notes on a conversation id |
-| `handoff` | Link thread → new id, store context, return a latest-message brief |
-| `recall` | Return the stored parts that best match a query, walking parents |
+| `handoff` | Link thread → new id, store context, return a one-line `reference` |
+| `load` | Pull the stored brief for that id (call this in the new chat) |
+| `recall` | Extra parent context, or the parts that match a question |
 | `thread` | Show the chain from this id back to the root |
 
 ## Build from source (optional)

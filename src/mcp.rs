@@ -9,22 +9,17 @@ use crate::engine::Engine;
 use crate::store::Store;
 
 const INSTRUCTIONS: &str = "\
-Use this server when a conversation is running out of context and work must continue in a new chat, \
-or when a continuation chat needs older detail from its parent thread.
+Use this server when a conversation is running out of context, when a new chat starts with a conversation-handoff reference, or when the user asks about a past conversation.
 
 Workflow:
-1. During a long session, call remember to checkpoint important facts before they fall out of the window.
-2. When the window is nearly full, call handoff with:
-   - thread_id: this conversation's id
-   - new_conversation_id: a new unique id for the next chat
-   - latest_message: the latest user request (the new chat continues from this)
-   - context: only the recent relevant notes, decisions, files, and errors — not the full transcript
-3. Give the user continuation_pack to paste as the first message of the new chat. Include the new conversation id.
-4. In the new chat, work from the brief. If you need older detail, call recall with your conversation_id and a specific query. \
-recall walks parent conversations recursively. Ask a narrower question to go deeper.
-5. A continuation can itself be handed off. Chains can be arbitrarily long.
+1. During a long session, call remember to checkpoint important facts.
+2. When the window is nearly full, call handoff with thread_id, new_conversation_id, latest_message, and only recent relevant context.
+3. Show the user ONLY the returned `reference` line (conversation-handoff: <id>). Do not paste a brief or transcript.
+4. In a new chat that contains that reference, immediately call load with the id. Work from the returned brief.
+5. If the user asks to look in the past conversation, or something is missing, call recall. A specific question finds matching parts; a vague 'past conversation' request returns extra parent context. Ask a narrower question to go deeper.
+6. A continuation can itself be handed off. Chains can be arbitrarily long.
 
-Never dump an entire transcript into handoff context. Store what matters for the latest request.";
+Never dump an entire transcript into handoff context. Never ask the user to copy a long continuation pack.";
 
 #[derive(Clone)]
 pub struct ConversationService {
@@ -66,11 +61,18 @@ pub struct HandoffParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct RecallParams {
-    /// The conversation you are in (or an ancestor you want to search from).
+pub struct LoadParams {
+    /// Continuation id, or the full `conversation-handoff: <id>` line from the new chat.
     pub conversation_id: String,
-    /// Specific question or keywords. Narrower queries go deeper into the stored thread.
-    pub query: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RecallParams {
+    /// The conversation you are in (or the `conversation-handoff: <id>` line).
+    pub conversation_id: String,
+    /// What to look up. Omit or say "past conversation" to pull extra parent context. A specific question finds matching parts.
+    #[serde(default)]
+    pub query: Option<String>,
     /// Maximum number of parts to return (default 6, max 20).
     #[serde(default)]
     pub max_results: Option<u32>,
@@ -92,7 +94,7 @@ impl ConversationService {
         }
     }
 
-    #[tool(description = "Link a full conversation to a new one. Stores the thread, keeps searchable context, and returns a brief focused on the latest message (not the whole history). Give continuation_pack to the user to paste into the new chat.")]
+    #[tool(description = "Link a full conversation to a new one. Stores searchable context and returns a one-line `reference`. Show the user only that line. Do not paste a brief.")]
     fn handoff(&self, Parameters(p): Parameters<HandoffParams>) -> String {
         match self.engine.handoff(
             &p.thread_id,
@@ -106,11 +108,19 @@ impl ConversationService {
         }
     }
 
-    #[tool(description = "Fetch the stored parts most relevant to a question. Walks parent conversations recursively, so a continuation can reach a parent that itself has a parent. Call again with a narrower query to go deeper.")]
+    #[tool(description = "Load the stored brief for a continuation chat. Call this immediately when the user (or first message) contains `conversation-handoff: <id>`.")]
+    fn load(&self, Parameters(p): Parameters<LoadParams>) -> String {
+        match self.engine.load(&p.conversation_id) {
+            Ok(v) => json(&v),
+            Err(e) => error(e),
+        }
+    }
+
+    #[tool(description = "Fetch more from parent conversations. Call this when the user asks to look in the past conversation, or when the brief is missing a fact. Walks parents recursively. A specific query finds matching parts; omit query for extra parent context.")]
     fn recall(&self, Parameters(p): Parameters<RecallParams>) -> String {
         match self
             .engine
-            .recall(&p.conversation_id, &p.query, p.max_results)
+            .recall(&p.conversation_id, p.query.as_deref(), p.max_results)
         {
             Ok(v) => json(&v),
             Err(e) => error(e),
