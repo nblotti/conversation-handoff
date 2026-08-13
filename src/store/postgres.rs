@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::mpsc::{self, Sender};
 
 use anyhow::{Context, Result};
 use postgres::types::ToSql;
@@ -11,35 +11,68 @@ use super::{
     ListFilter, Status,
 };
 
+type Job = Box<dyn FnOnce(&mut Client) + Send>;
+
+/// Owns a `postgres::Client` on a dedicated OS thread.
+///
+/// The sync postgres crate starts a current-thread Tokio runtime. MCP already
+/// runs inside Tokio, so connect/query must never happen on a runtime worker.
 pub struct PostgresBackend {
-    client: Mutex<Client>,
+    jobs: Sender<Job>,
 }
 
 impl PostgresBackend {
     pub fn connect(cfg: &StoreConfig) -> Result<Self> {
-        run_off_tokio(|| {
-            let mut client = connect(cfg)?;
-            migrate::apply_postgres(&mut client).context("postgres migrations")?;
-            Ok(Self {
-                client: Mutex::new(client),
+        let cfg = cfg.clone();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let (jobs_tx, jobs_rx) = mpsc::channel::<Job>();
+        std::thread::Builder::new()
+            .name("conversation-handoff-postgres".into())
+            .spawn(move || match open_client(&cfg) {
+                Ok(mut client) => {
+                    let _ = ready_tx.send(Ok(()));
+                    while let Ok(job) = jobs_rx.recv() {
+                        job(&mut client);
+                    }
+                }
+                Err(err) => {
+                    let _ = ready_tx.send(Err(err));
+                }
             })
-        })
+            .context("start postgres worker thread")?;
+        ready_rx.recv().unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
+                "postgres worker thread exited during connect"
+            ))
+        })?;
+        Ok(Self { jobs: jobs_tx })
     }
 
-    fn with_client<R: Send>(&self, f: impl FnOnce(&mut Client) -> Result<R> + Send) -> Result<R> {
-        run_off_tokio(|| {
-            let mut client = self
-                .client
-                .lock()
-                .map_err(|_| anyhow::anyhow!("postgres connection lock poisoned"))?;
-            f(&mut client)
-        })
+    fn with_client<R: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Client) -> Result<R> + Send + 'static,
+    ) -> Result<R> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.jobs
+            .send(Box::new(move |client| {
+                let _ = tx.send(f(client));
+            }))
+            .map_err(|_| anyhow::anyhow!("postgres worker thread exited"))?;
+        rx.recv()
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("postgres worker thread panicked")))
     }
+}
+
+fn open_client(cfg: &StoreConfig) -> Result<Client> {
+    let mut client = connect(cfg)?;
+    migrate::apply_postgres(&mut client).context("postgres migrations")?;
+    Ok(client)
 }
 
 impl Backend for PostgresBackend {
     fn load(&self, id: &str) -> Result<Option<Conversation>> {
-        self.with_client(|client| {
+        let id = id.to_string();
+        self.with_client(move |client| {
             let row = client
                 .query_opt(
                     "SELECT id, parent_id, title, created_at, latest_message, brief, chunks,
@@ -62,17 +95,23 @@ impl Backend for PostgresBackend {
         let last_saved = conv.last_saved_at as i64;
         let pruned = conv.pruned_at.map(|v| v as i64);
         let chunk_count = conv.chunk_count as i64;
-        let status = conv.status.as_str();
-        self.with_client(|client| {
+        let id = conv.id.clone();
+        let parent_id = conv.parent_id.clone();
+        let title = conv.title.clone();
+        let latest_message = conv.latest_message.clone();
+        let brief = conv.brief.clone();
+        let summary = conv.summary.clone();
+        let status = conv.status.as_str().to_string();
+        self.with_client(move |client| {
             let params: [&(dyn ToSql + Sync); 13] = [
-                &conv.id,
-                &conv.parent_id,
-                &conv.title,
+                &id,
+                &parent_id,
+                &title,
                 &created,
-                &conv.latest_message,
-                &conv.brief,
+                &latest_message,
+                &brief,
                 &chunks,
-                &conv.summary,
+                &summary,
                 &status,
                 &updated,
                 &last_saved,
@@ -114,7 +153,7 @@ impl Backend for PostgresBackend {
             .map(|d| filter.now_secs.saturating_sub(d) as i64)
             .unwrap_or(0);
         let limit = filter.limit.max(1) as i64;
-        self.with_client(|client| {
+        self.with_client(move |client| {
             let rows = client
                 .query(
                     "SELECT id, parent_id, title, created_at, latest_message, brief, chunks,
@@ -138,8 +177,9 @@ impl Backend for PostgresBackend {
     }
 
     fn prune(&self, id: &str, pruned_at: u64) -> Result<bool> {
+        let id = id.to_string();
         let pruned_at = pruned_at as i64;
-        self.with_client(|client| {
+        self.with_client(move |client| {
             let n = client
                 .execute(
                     "UPDATE conversations SET
@@ -163,7 +203,8 @@ impl Backend for PostgresBackend {
     }
 
     fn purge(&self, id: &str) -> Result<bool> {
-        self.with_client(|client| {
+        let id = id.to_string();
+        self.with_client(move |client| {
             client
                 .execute("DELETE FROM images WHERE conversation_id = $1", &[&id])
                 .context("postgres purge images")?;
@@ -185,10 +226,12 @@ impl Backend for PostgresBackend {
     ) -> Result<ImageMeta> {
         let byte_len = byte_len as i64;
         let created = now_secs() as i64;
+        let conversation_id = conversation_id.to_string();
+        let mime = mime.to_string();
         let bytes = bytes.to_vec();
         let caption = caption.map(str::to_string);
         let source = source.map(str::to_string);
-        self.with_client(|client| {
+        self.with_client(move |client| {
             let seq: i32 = client
                 .query_one(
                     "SELECT COALESCE(MAX(seq), 0) + 1 FROM images WHERE conversation_id = $1",
@@ -225,8 +268,9 @@ impl Backend for PostgresBackend {
     }
 
     fn load_image(&self, conversation_id: &str, seq: i64) -> Result<Option<ImageBlob>> {
+        let conversation_id = conversation_id.to_string();
         let seq_i32 = seq as i32;
-        self.with_client(|client| {
+        self.with_client(move |client| {
             let row = client
                 .query_opt(
                     "SELECT caption, mime, bytes, byte_len, source
@@ -257,7 +301,8 @@ impl Backend for PostgresBackend {
     }
 
     fn list_images(&self, conversation_id: &str) -> Result<Vec<ImageMeta>> {
-        self.with_client(|client| {
+        let conversation_id = conversation_id.to_string();
+        self.with_client(move |client| {
             let rows = client
                 .query(
                     "SELECT seq, caption, mime,
@@ -283,24 +328,12 @@ impl Backend for PostgresBackend {
     }
 
     fn is_empty(&self) -> Result<bool> {
-        self.with_client(|client| {
+        self.with_client(move |client| {
             let n: i64 = client
                 .query_one("SELECT COUNT(*) FROM conversations", &[])?
                 .get(0);
             Ok(n == 0)
         })
-    }
-}
-
-fn run_off_tokio<R: Send>(f: impl FnOnce() -> Result<R> + Send) -> Result<R> {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        std::thread::scope(|s| {
-            s.spawn(f)
-                .join()
-                .unwrap_or_else(|_| Err(anyhow::anyhow!("postgres worker thread panicked")))
-        })
-    } else {
-        f()
     }
 }
 
@@ -454,5 +487,41 @@ mod tests {
         assert_eq!(b.user.as_deref(), Some("alice"));
         assert_eq!(b.password.as_deref(), Some("s3cret"));
         assert_eq!(b.port, 6543);
+    }
+
+    #[test]
+    fn sync_postgres_runtime_cannot_start_on_a_tokio_worker() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let nested_on_worker = rt.block_on(async {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {});
+            }))
+            .is_err()
+        });
+        assert!(
+            nested_on_worker,
+            "sync postgres would panic if connect ran on an MCP Tokio worker"
+        );
+
+        rt.block_on(async {
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            std::thread::spawn(move || {
+                let inner = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("inner runtime on dedicated thread");
+                inner.block_on(async {});
+                let _ = tx.send(());
+            });
+            rx.recv().expect("dedicated thread finished");
+        });
     }
 }

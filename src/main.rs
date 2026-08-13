@@ -140,11 +140,14 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Mcp) {
         Command::Mcp => {
+            // Open the store before Tokio starts. The sync postgres client
+            // builds its own runtime and panics if that happens on a worker.
+            let store = Store::open()?;
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .context("tokio runtime")?;
-            rt.block_on(run_mcp())
+            rt.block_on(run_mcp(store))
         }
         Command::Save {
             conversation_id,
@@ -243,8 +246,7 @@ fn main() -> Result<()> {
     }
 }
 
-async fn run_mcp() -> Result<()> {
-    let store = Store::open()?;
+async fn run_mcp(store: Store) -> Result<()> {
     let service = ConversationService::new(store)
         .serve(stdio())
         .await
