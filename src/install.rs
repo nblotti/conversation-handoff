@@ -176,17 +176,37 @@ fn append_unique_section(path: &Path, section: &str) -> Result<()> {
     } else {
         String::new()
     };
-    if existing.contains("## Conversation handoff") {
-        return Ok(());
-    }
-    let mut out = existing;
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    if !out.is_empty() {
-        out.push('\n');
-    }
-    out.push_str(section);
+    let heading = "## Conversation handoff";
+    let mut out = if let Some(start) = existing.find(heading) {
+        let before = &existing[..start];
+        let after = existing[start + heading.len()..]
+            .find("\n## ")
+            .map(|rel| &existing[start + heading.len() + rel..])
+            .unwrap_or("");
+        let mut s = before.trim_end().to_string();
+        if !s.is_empty() {
+            s.push_str("\n\n");
+        }
+        s.push_str(section);
+        if !after.is_empty() {
+            if !s.ends_with('\n') {
+                s.push('\n');
+            }
+            s.push('\n');
+            s.push_str(after.trim_start());
+        }
+        s
+    } else {
+        let mut s = existing;
+        if !s.is_empty() && !s.ends_with('\n') {
+            s.push('\n');
+        }
+        if !s.is_empty() {
+            s.push('\n');
+        }
+        s.push_str(section);
+        s
+    };
     if !out.ends_with('\n') {
         out.push('\n');
     }
@@ -197,6 +217,8 @@ fn append_unique_section(path: &Path, section: &str) -> Result<()> {
 pub fn instruction_block() -> &'static str {
     "\
 ## Conversation handoff
+
+If the MCP server is missing, install the prebuilt binary. Do not install Rust or run Cargo. Linux: `curl -fsSL https://raw.githubusercontent.com/nblotti/conversation-handoff/main/scripts/install.sh | bash`. Windows: `irm https://raw.githubusercontent.com/nblotti/conversation-handoff/main/scripts/install.ps1 | iex`. Linux builds are static musl (no GLIBC upgrade). If the binary cannot run, stop; do not compile from source.
 
 When the context window is nearly full:
 

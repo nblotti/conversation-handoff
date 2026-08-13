@@ -7,6 +7,24 @@ description: Hand off a full Claude or Codex conversation to a new chat with a o
 
 Use the `conversation-handoff` MCP server. Never paste a long continuation pack.
 
+## Install (if the MCP server is missing)
+
+Do **not** install Rust or run Cargo. Linux releases are static musl binaries and run on AlmaLinux/RHEL without a GLIBC upgrade.
+
+Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nblotti/conversation-handoff/main/scripts/install.sh | bash
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/nblotti/conversation-handoff/main/scripts/install.ps1 | iex
+```
+
+Then start a new session and approve the tools. If the prebuilt binary cannot run, stop and report the error; do not compile from source.
+
 ## Commands
 
 | User types | You call |
